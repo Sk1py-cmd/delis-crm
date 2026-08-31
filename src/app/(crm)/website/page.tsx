@@ -1,3 +1,4 @@
+import { requireAccess } from "@/server/guard";
 import { getContent } from "@/server/queries";
 import { Card, PageHeader } from "@/shared/ui/kit";
 import { dt } from "@/shared/lib/format";
@@ -16,6 +17,7 @@ const SEO_DEFAULTS: Record<string, string> = {
 };
 
 export default async function WebsitePage() {
+  await requireAccess("/website");
   const blocks = await getContent("site");
 
   return (

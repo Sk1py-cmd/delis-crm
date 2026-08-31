@@ -1,9 +1,11 @@
+import { requireAccess } from "@/server/guard";
 import { getActivity, getOrdersLite } from "@/server/queries";
 import { NotificationsClient } from "./NotificationsClient";
 
 export const dynamic = "force-dynamic";
 
 export default async function NotificationsPage() {
+  await requireAccess("/notifications");
   const [activity, orders] = await Promise.all([getActivity(), getOrdersLite()]);
 
   const items = [

@@ -12,6 +12,7 @@ export interface SessionUser {
   login: string;
   email: string;
   role: string;
+  agentId: number | null;
 }
 
 export async function getSessionUser(): Promise<SessionUser | null> {
@@ -23,15 +24,24 @@ export async function getSessionUser(): Promise<SessionUser | null> {
       .select({ u: s.users })
       .from(s.sessions)
       .innerJoin(s.users, eq(s.users.id, s.sessions.userId))
-      .where(and(eq(s.sessions.token, token), gt(s.sessions.expiresAt, new Date())))
+      .where(
+        and(
+          eq(s.sessions.token, token),
+          gt(s.sessions.expiresAt, new Date()),
+          eq(s.users.status, "active"),
+        ),
+      )
       .limit(1);
     const u = rows[0]?.u;
-    return u ? { id: u.id, name: u.name, login: u.login, email: u.email, role: u.role } : null;
+    return u
+      ? { id: u.id, name: u.name, login: u.login, email: u.email, role: u.role, agentId: u.agentId }
+      : null;
   } catch {
     return null;
   }
 }
 
+/** Only the single Owner can issue, reset, or revoke employee credentials. */
 export function canManageUsers(role: string) {
-  return role === "owner" || role === "admin";
+  return role === "owner";
 }

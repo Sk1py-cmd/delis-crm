@@ -2,9 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { and, eq, sql } from "drizzle-orm";
 import { db } from "@/db";
 import * as s from "@/db/schema";
-import { ensureSeed } from "@/db/seed";
-import { getSessionUser, canManageUsers } from "@/server/auth";
-import { hashPassword, verifyPassword } from "@/server/password";
+import { canManageUsers } from "@/server/auth";
+import { hashPassword, passwordValidationError, verifyPassword } from "@/server/password";
+import { requireManageAction } from "@/server/apiAuth";
+import { isStaffRole } from "@/shared/config/access";
 import { recordSyncEvent, syncEverything, recordBroadcast, createPromocode, toggleMarketingTrigger, createSupplier, createPurchaseOrder, receivePurchaseOrder, createReturn, approveReturn, addCourier, assignDelivery, completeDelivery, addAgentVisit, createAgentStoreOrder, createTask, updateTaskStatus, deleteTask, sendAgentMessage, saveIntegration, testTelegramBot, sendTelegramMessage, saveArticle, deleteArticle, resetDemoData, publishSurface, saveSeoSettings, createInstagramPost, saveMiniAppBanners } from "@/server/queries";
 
 export const dynamic = "force-dynamic";
@@ -18,56 +19,143 @@ const str = (v: unknown, d = "") => (typeof v === "string" ? v : d);
 const num = (v: unknown, d = 0) => (typeof v === "number" && Number.isFinite(v) ? v : d);
 
 export async function POST(req: NextRequest) {
-  await ensureSeed();
-  const user = await getSessionUser();
-  if (!user) return NextResponse.json({ error: "Требуется авторизация" }, { status: 401 });
+  let body: ManageBody;
+  try {
+    body = (await req.json()) as ManageBody;
+  } catch {
+    return NextResponse.json({ error: "Некорректный JSON" }, { status: 400 });
+  }
+  if (!body || typeof body.action !== "string") {
+    return NextResponse.json({ error: "Не указано действие" }, { status: 400 });
+  }
 
-  const body = (await req.json()) as ManageBody;
-  const d = body.data ?? {};
-  const admin = canManageUsers(user.role);
+  const authorization = await requireManageAction(req, body.action);
+  if (!authorization.ok) return authorization.response;
+  const { user } = authorization;
+  const d = body.data && typeof body.data === "object" && !Array.isArray(body.data) ? body.data : {};
+  const owner = canManageUsers(user.role);
+  const canConfigureIntegrations = user.role === "owner" || user.role === "admin";
 
   try {
     switch (body.action) {
       case "createUser": {
-        if (!admin) return NextResponse.json({ error: "Только Owner/Admin может создавать аккаунты" }, { status: 403 });
-        const name = str(d.name).trim();
+        if (!owner) return NextResponse.json({ error: "Только Owner может создавать аккаунты" }, { status: 403 });
+        const name = str(d.name).trim().slice(0, 120);
         const login = str(d.login).trim().toLowerCase().replace(/\s+/g, "");
         const password = str(d.password);
-        if (!name || !login || password.length < 4) {
-          return NextResponse.json({ error: "Имя, логин и пароль (мин. 4 символа) обязательны" }, { status: 400 });
+        const role = str(d.role, "manager");
+        const passwordError = passwordValidationError(password);
+        if (!name || !login || passwordError) {
+          return NextResponse.json({ error: !name || !login ? "Имя и логин обязательны" : passwordError }, { status: 400 });
         }
         if (!/^[a-z0-9._-]{3,24}$/.test(login)) {
           return NextResponse.json({ error: "Логин: 3–24 символа, латиница/цифры/точка/дефис" }, { status: 400 });
         }
+        if (!isStaffRole(role)) {
+          return NextResponse.json({ error: "Можно создать только сотрудника. В системе может быть только один Owner." }, { status: 400 });
+        }
         const exists = await db.select({ id: s.users.id }).from(s.users).where(sql`lower(${s.users.login}) = ${login}`).limit(1);
         if (exists.length > 0) return NextResponse.json({ error: `Логин «${login}» уже занят` }, { status: 409 });
-        const [u] = await db
+
+        let agentId: number | null = null;
+        if (role === "agent") {
+          const requestedAgentId = num(d.agentId);
+          if (!Number.isSafeInteger(requestedAgentId) || requestedAgentId <= 0) {
+            return NextResponse.json({ error: "Для роли Agent выберите профиль агента" }, { status: 400 });
+          }
+          const [agent] = await db.select({ id: s.agents.id }).from(s.agents).where(eq(s.agents.id, requestedAgentId)).limit(1);
+          if (!agent) return NextResponse.json({ error: "Профиль агента не найден" }, { status: 404 });
+          const assigned = await db.select({ id: s.users.id }).from(s.users).where(eq(s.users.agentId, agent.id)).limit(1);
+          if (assigned.length > 0) return NextResponse.json({ error: "Этот профиль агента уже привязан к сотруднику" }, { status: 409 });
+          agentId = agent.id;
+        }
+
+        const [created] = await db
           .insert(s.users)
-          .values({ name, login, email: str(d.email).trim(), role: str(d.role, "manager"), passwordHash: hashPassword(password) })
+          .values({
+            name,
+            login,
+            email: str(d.email).trim().toLowerCase().slice(0, 200),
+            role,
+            agentId,
+            passwordHash: hashPassword(password),
+            status: "active",
+          })
           .returning();
-        await db.insert(s.activity).values({ actor: user.name, action: "создал аккаунт сотрудника", entity: `@${login}` });
-        return NextResponse.json({ ok: true, id: u.id });
+        await db.insert(s.activity).values({ actor: user.name, action: "создал аккаунт сотрудника", entity: `@${login} · ${role}` });
+        return NextResponse.json({ ok: true, id: created.id });
+      }
+      case "updateUserRole": {
+        if (!owner) return NextResponse.json({ error: "Только Owner может назначать роли" }, { status: 403 });
+        const id = num(d.id);
+        const role = str(d.role);
+        if (!Number.isSafeInteger(id) || id <= 0 || !isStaffRole(role)) {
+          return NextResponse.json({ error: "Некорректный сотрудник или роль" }, { status: 400 });
+        }
+        const [target] = await db.select().from(s.users).where(eq(s.users.id, id)).limit(1);
+        if (!target) return NextResponse.json({ error: "Пользователь не найден" }, { status: 404 });
+        if (target.role === "owner") return NextResponse.json({ error: "Роль единственного Owner нельзя изменить" }, { status: 403 });
+
+        let agentId: number | null = null;
+        if (role === "agent") {
+          const requestedAgentId = num(d.agentId);
+          if (!Number.isSafeInteger(requestedAgentId) || requestedAgentId <= 0) {
+            return NextResponse.json({ error: "Для роли Agent выберите профиль агента" }, { status: 400 });
+          }
+          const [agent] = await db.select({ id: s.agents.id }).from(s.agents).where(eq(s.agents.id, requestedAgentId)).limit(1);
+          if (!agent) return NextResponse.json({ error: "Профиль агента не найден" }, { status: 404 });
+          const assigned = await db.select({ id: s.users.id }).from(s.users).where(eq(s.users.agentId, agent.id)).limit(1);
+          if (assigned.some((assignedUser) => assignedUser.id !== target.id)) {
+            return NextResponse.json({ error: "Этот профиль агента уже привязан к сотруднику" }, { status: 409 });
+          }
+          agentId = agent.id;
+        }
+
+        await db.update(s.users).set({ role, agentId }).where(eq(s.users.id, id));
+        // Revoke existing sessions so a changed role takes effect immediately in every tab/device.
+        await db.delete(s.sessions).where(eq(s.sessions.userId, id));
+        await db.insert(s.activity).values({ actor: user.name, action: "изменил роль сотрудника", entity: `@${target.login} → ${role}` });
+        return NextResponse.json({ ok: true, reloginRequired: true });
+      }
+      case "setUserStatus": {
+        if (!owner) return NextResponse.json({ error: "Только Owner может блокировать аккаунты" }, { status: 403 });
+        const id = num(d.id);
+        const status = str(d.status);
+        if (!Number.isSafeInteger(id) || id <= 0 || !["active", "blocked"].includes(status)) {
+          return NextResponse.json({ error: "Некорректный пользователь или статус" }, { status: 400 });
+        }
+        const [target] = await db.select().from(s.users).where(eq(s.users.id, id)).limit(1);
+        if (!target) return NextResponse.json({ error: "Пользователь не найден" }, { status: 404 });
+        if (target.role === "owner") return NextResponse.json({ error: "Нельзя заблокировать Owner-аккаунт" }, { status: 403 });
+        await db.update(s.users).set({ status }).where(eq(s.users.id, id));
+        if (status === "blocked") await db.delete(s.sessions).where(eq(s.sessions.userId, id));
+        await db.insert(s.activity).values({ actor: user.name, action: status === "blocked" ? "заблокировал аккаунт" : "разблокировал аккаунт", entity: `@${target.login}` });
+        return NextResponse.json({ ok: true });
       }
       case "resetPassword": {
-        if (!admin) return NextResponse.json({ error: "Недостаточно прав" }, { status: 403 });
+        if (!owner) return NextResponse.json({ error: "Только Owner может менять пароли" }, { status: 403 });
+        const id = num(d.id);
+        if (!Number.isSafeInteger(id) || id <= 0) return NextResponse.json({ error: "Некорректный пользователь" }, { status: 400 });
         const password = str(d.password);
-        if (password.length < 4) return NextResponse.json({ error: "Пароль слишком короткий" }, { status: 400 });
-        await db.update(s.users).set({ passwordHash: hashPassword(password) }).where(eq(s.users.id, num(d.id)));
-        return NextResponse.json({ ok: true });
-      }
-      case "toggle2fa": {
-        if (!admin) return NextResponse.json({ error: "Недостаточно прав" }, { status: 403 });
-        await db.update(s.users).set({ twoFa: sql`not two_fa` }).where(eq(s.users.id, num(d.id)));
-        return NextResponse.json({ ok: true });
+        const passwordError = passwordValidationError(password);
+        if (passwordError) return NextResponse.json({ error: passwordError }, { status: 400 });
+        const [target] = await db.select().from(s.users).where(eq(s.users.id, id)).limit(1);
+        if (!target) return NextResponse.json({ error: "Пользователь не найден" }, { status: 404 });
+        await db.update(s.users).set({ passwordHash: hashPassword(password) }).where(eq(s.users.id, id));
+        await db.delete(s.sessions).where(eq(s.sessions.userId, id));
+        await db.insert(s.activity).values({ actor: user.name, action: "сбросил пароль сотрудника", entity: `@${target.login}` });
+        return NextResponse.json({ ok: true, reloginRequired: id === user.id });
       }
       case "deleteUser": {
-        if (!admin) return NextResponse.json({ error: "Недостаточно прав" }, { status: 403 });
+        if (!owner) return NextResponse.json({ error: "Только Owner может удалять аккаунты" }, { status: 403 });
         const id = num(d.id);
+        if (!Number.isSafeInteger(id) || id <= 0) return NextResponse.json({ error: "Некорректный пользователь" }, { status: 400 });
         const [target] = await db.select().from(s.users).where(eq(s.users.id, id));
         if (!target) return NextResponse.json({ error: "Пользователь не найден" }, { status: 404 });
-        if (target.role === "owner") return NextResponse.json({ error: "Нельзя удалить Owner-аккаунт" }, { status: 403 });
+        if (target.role === "owner" || target.id === user.id) return NextResponse.json({ error: "Нельзя удалить Owner-аккаунт" }, { status: 403 });
+        await db.delete(s.sessions).where(eq(s.sessions.userId, id));
         await db.delete(s.users).where(eq(s.users.id, id));
-        await db.insert(s.activity).values({ actor: user.name, action: "удалил аккаунт", entity: target.email });
+        await db.insert(s.activity).values({ actor: user.name, action: "удалил аккаунт", entity: `@${target.login}` });
         return NextResponse.json({ ok: true });
       }
       case "createAgent": {
@@ -280,7 +368,10 @@ export async function POST(req: NextRequest) {
       }
       case "addAgentVisit": {
         const agentId = num(d.agentId);
-        if (!agentId) return NextResponse.json({ error: "Выберите агента" }, { status: 400 });
+        if (!Number.isSafeInteger(agentId) || agentId <= 0) return NextResponse.json({ error: "Выберите агента" }, { status: 400 });
+        if (user.role === "agent" && user.agentId !== agentId) {
+          return NextResponse.json({ error: "Нельзя добавлять визиты за другого агента" }, { status: 403 });
+        }
         const storeName = str(d.storeName).trim();
         if (!storeName) return NextResponse.json({ error: "Укажите название торговой точки" }, { status: 400 });
         const visit = await addAgentVisit({
@@ -320,11 +411,19 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ ok: true });
       }
       case "sendAgentMessage": {
-        const m = await sendAgentMessage(num(d.agentId), str(d.body), Boolean(d.fromAdmin ?? true));
+        const agentId = num(d.agentId);
+        const text = str(d.body).trim();
+        if (!Number.isSafeInteger(agentId) || agentId <= 0 || !text || text.length > 4_000) {
+          return NextResponse.json({ error: "Некорректное сообщение" }, { status: 400 });
+        }
+        if (user.role === "agent" && user.agentId !== agentId) {
+          return NextResponse.json({ error: "Нет доступа к переписке другого агента" }, { status: 403 });
+        }
+        const m = await sendAgentMessage(agentId, text, user.role !== "agent");
         return NextResponse.json({ ok: true, id: m.id });
       }
       case "saveIntegration": {
-        if (!admin) return NextResponse.json({ error: "Только Owner/Admin может менять интеграции" }, { status: 403 });
+        if (!canConfigureIntegrations) return NextResponse.json({ error: "Только Owner или Admin может менять интеграции" }, { status: 403 });
         const creds = (d.credentials as Record<string, string>) ?? {};
         const i = await saveIntegration({ key: str(d.key), credentials: creds, enabled: Boolean(d.enabled), actor: user.name });
         return NextResponse.json({ ok: true, id: i?.id, status: i?.status });
@@ -387,17 +486,22 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ ok: true });
       }
       case "changePassword": {
-        const [userRow] = await db.select().from(s.users).where(sql`name = ${user.name}`).limit(1);
+        if (!owner) return NextResponse.json({ error: "Паролями управляет только Owner" }, { status: 403 });
+        const [userRow] = await db.select().from(s.users).where(eq(s.users.id, user.id)).limit(1);
         if (!userRow) return NextResponse.json({ error: "Пользователь не найден" }, { status: 404 });
         if (!verifyPassword(str(d.currentPassword), userRow.passwordHash)) {
           return NextResponse.json({ error: "Неверный текущий пароль" }, { status: 403 });
         }
+        const passwordError = passwordValidationError(str(d.newPassword));
+        if (passwordError) return NextResponse.json({ error: passwordError }, { status: 400 });
         await db.update(s.users).set({ passwordHash: hashPassword(str(d.newPassword)) }).where(eq(s.users.id, userRow.id));
+        await db.delete(s.sessions).where(eq(s.sessions.userId, user.id));
         await db.insert(s.activity).values({ actor: user.name, action: "сменил пароль", entity: "свой аккаунт" });
-        return NextResponse.json({ ok: true });
+        return NextResponse.json({ ok: true, reloginRequired: true });
       }
       case "changeLogin": {
-        const [userRow] = await db.select().from(s.users).where(sql`name = ${user.name}`).limit(1);
+        if (!owner) return NextResponse.json({ error: "Логином Owner управляет только Owner" }, { status: 403 });
+        const [userRow] = await db.select().from(s.users).where(eq(s.users.id, user.id)).limit(1);
         if (!userRow) return NextResponse.json({ error: "Пользователь не найден" }, { status: 404 });
         if (!verifyPassword(str(d.currentPassword), userRow.passwordHash)) {
           return NextResponse.json({ error: "Неверный пароль" }, { status: 403 });
@@ -406,8 +510,8 @@ export async function POST(req: NextRequest) {
         if (!/^[a-z0-9._-]{3,24}$/.test(newLogin)) {
           return NextResponse.json({ error: "Недопустимый логин" }, { status: 400 });
         }
-        const exists = await db.select({ id: s.users.id }).from(s.users).where(eq(s.users.login, newLogin)).limit(1);
-        if (exists.length > 0) return NextResponse.json({ error: "Логин уже занят" }, { status: 409 });
+        const exists = await db.select({ id: s.users.id }).from(s.users).where(sql`lower(${s.users.login}) = ${newLogin}`).limit(1);
+        if (exists.some((existing) => existing.id !== user.id)) return NextResponse.json({ error: "Логин уже занят" }, { status: 409 });
         await db.update(s.users).set({ login: newLogin }).where(eq(s.users.id, userRow.id));
         await db.insert(s.activity).values({ actor: user.name, action: "сменил логин", entity: `@${newLogin}` });
         return NextResponse.json({ ok: true, login: newLogin });
@@ -459,14 +563,18 @@ export async function POST(req: NextRequest) {
       }
       case "createAgentStoreOrder": {
         const agentId = num(d.agentId);
-        if (!agentId) return NextResponse.json({ error: "Выберите агента" }, { status: 400 });
-        const storeName = str(d.storeName).trim();
+        if (!Number.isSafeInteger(agentId) || agentId <= 0) return NextResponse.json({ error: "Выберите агента" }, { status: 400 });
+        if (user.role === "agent" && user.agentId !== agentId) {
+          return NextResponse.json({ error: "Нельзя оформлять заказ за другого агента" }, { status: 403 });
+        }
+        const storeName = str(d.storeName).trim().slice(0, 200);
         if (!storeName) return NextResponse.json({ error: "Укажите название торговой точки" }, { status: 400 });
         const items = Array.isArray(d.items) ? (d.items as { productId?: number; qty?: number }[]) : [];
-        const parsed = items
-          .map((i) => ({ productId: num(i.productId), qty: num(i.qty, 1) }))
-          .filter((i) => i.productId > 0);
-        if (parsed.length === 0) return NextResponse.json({ error: "Добавьте хотя бы один товар" }, { status: 400 });
+        if (items.length === 0 || items.length > 100) return NextResponse.json({ error: "Добавьте от 1 до 100 товаров" }, { status: 400 });
+        const parsed = items.map((i) => ({ productId: num(i.productId), qty: num(i.qty, 1) }));
+        if (parsed.some((i) => !Number.isSafeInteger(i.productId) || i.productId <= 0 || !Number.isSafeInteger(i.qty) || i.qty <= 0 || i.qty > 100_000)) {
+          return NextResponse.json({ error: "Некорректные товары или количество" }, { status: 400 });
+        }
         const order = await createAgentStoreOrder({
           agentId,
           storeName,

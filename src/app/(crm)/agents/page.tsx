@@ -1,9 +1,11 @@
+import { requireAccess } from "@/server/guard";
 import { getAgents, getAgentVisits, getProducts } from "@/server/queries";
 import { AgentsClient } from "./AgentsClient";
 
 export const dynamic = "force-dynamic";
 
 export default async function AgentsPage() {
+  await requireAccess("/agents");
   const [rows, visits, products] = await Promise.all([
     getAgents(),
     getAgentVisits(),

@@ -1,9 +1,11 @@
+import { requireAccess } from "@/server/guard";
 import { getDeliveryData, recentOrdersList } from "@/server/queries";
 import { DeliveryClient } from "./DeliveryClient";
 
 export const dynamic = "force-dynamic";
 
 export default async function DeliveryPage() {
+  await requireAccess("/delivery");
   const [data, orders] = await Promise.all([getDeliveryData(), recentOrdersList(30)]);
   return (
     <DeliveryClient

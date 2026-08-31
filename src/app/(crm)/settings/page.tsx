@@ -1,3 +1,4 @@
+import { requireAccess } from "@/server/guard";
 import { getSessionUser } from "@/server/auth";
 import { getIntegrations } from "@/server/queries";
 import { SettingsClient } from "./SettingsClient";
@@ -5,6 +6,7 @@ import { SettingsClient } from "./SettingsClient";
 export const dynamic = "force-dynamic";
 
 export default async function SettingsPage() {
+  await requireAccess("/settings");
   const [user, integrations] = await Promise.all([getSessionUser(), getIntegrations()]);
   const tg = integrations.find((i) => i.key === "telegram_bot");
   const creds = tg?.credentials ?? {};

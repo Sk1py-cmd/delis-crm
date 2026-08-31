@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
+import { canAccess } from "@/shared/config/access";
 
 const SHORTCUTS: Record<string, string> = {
   "g d": "/",
@@ -16,7 +17,7 @@ const SHORTCUTS: Record<string, string> = {
   "g u": "/users",
 };
 
-export function useKeyboardShortcuts() {
+export function useKeyboardShortcuts(role: string) {
   const router = useRouter();
   const buffer = useRef<string[]>([]);
 
@@ -31,15 +32,16 @@ export function useKeyboardShortcuts() {
       buffer.current = buffer.current.slice(-2);
       const seq = buffer.current.join(" ");
 
-      if (SHORTCUTS[seq]) {
+      const href = SHORTCUTS[seq];
+      if (href && canAccess(role, href)) {
         e.preventDefault();
-        router.push(SHORTCUTS[seq]);
+        router.push(href);
         buffer.current = [];
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [router]);
+  }, [role, router]);
 }
 
 export { SHORTCUTS };

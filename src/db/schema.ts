@@ -212,9 +212,13 @@ export const users = pgTable("users", {
   email: text("email").notNull().default(""),
   role: text("role").notNull().default("manager"),
   status: text("status").notNull().default("active"),
-  lastIp: text("last_ip").notNull().default("94.158.0.1"),
-  device: text("device").notNull().default("MacBook Pro · Chrome"),
+  lastIp: text("last_ip").notNull().default(""),
+  device: text("device").notNull().default(""),
   twoFa: boolean("two_fa").notNull().default(false),
+  /** Marks that the singleton Owner was initialized from OWNER_LOGIN/OWNER_PASSWORD. */
+  ownerInitializedAt: timestamp("owner_initialized_at"),
+  /** Linked employee profile for the Agent portal; one CRM user can own one agent profile. */
+  agentId: integer("agent_id").unique(),
   passwordHash: text("password_hash").notNull().default(""),
   lastLoginAt: timestamp("last_login_at").notNull().defaultNow(),
 });

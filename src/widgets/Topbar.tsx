@@ -24,7 +24,7 @@ export function Topbar({ user }: { user: { name: string; login: string; email: s
   const { locale, setLocale } = useLocale();
   const pathname = usePathname();
   const t = useT();
-  useKeyboardShortcuts();
+  useKeyboardShortcuts(user.role);
   const current = NAV.find((n) => n.href === pathname);
   const allowedNav = navForRole(user.role);
 
@@ -65,9 +65,11 @@ export function Topbar({ user }: { user: { name: string; login: string; email: s
           </button>
 
           <div className="flex items-center gap-1 sm:gap-2 shrink-0">
-            <Link href="/orders" className="btn btn-primary hidden xl:inline-flex shrink-0">
-              <Plus size={15} /> {t("topbar.newOrder")}
-            </Link>
+            {allowedNav.some((item) => item.href === "/orders") && (
+              <Link href="/orders" className="btn btn-primary hidden xl:inline-flex shrink-0">
+                <Plus size={15} /> {t("topbar.newOrder")}
+              </Link>
+            )}
 
             {/* Язык */}
             <div className="relative shrink-0">
@@ -223,7 +225,7 @@ export function Topbar({ user }: { user: { name: string; login: string; email: s
         )}
       </AnimatePresence>
 
-      <CommandPalette open={cmd} setOpen={setCmd} />
+      <CommandPalette open={cmd} setOpen={setCmd} role={user.role} />
     </>
   );
 }

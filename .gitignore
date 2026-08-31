@@ -1,0 +1,22 @@
+# Dependencies and framework output
+node_modules/
+.next/
+out/
+build/
+dist/
+coverage/
+
+# Local secrets
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Logs and OS/editor files
+*.log
+.DS_Store
+.vscode/
+.idea/
+
+# TypeScript build metadata
+tsconfig.tsbuildinfo

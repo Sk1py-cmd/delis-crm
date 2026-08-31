@@ -1,13 +1,13 @@
 import { redirect } from "next/navigation";
 import { getSessionUser } from "./auth";
-import { canAccess } from "@/shared/config/nav";
+import { canAccess, defaultRouteForRole } from "@/shared/config/access";
 
-/** Серверная защита страницы: редирект на дашборд, если роль не имеет доступа */
+/** Server-side route protection. Navigation visibility is never treated as authorization. */
 export async function requireAccess(href: string) {
   const user = await getSessionUser();
-  if (!user) return null;
+  if (!user) redirect("/");
   if (!canAccess(user.role, href)) {
-    redirect("/");
+    redirect(defaultRouteForRole(user.role));
   }
   return user;
 }

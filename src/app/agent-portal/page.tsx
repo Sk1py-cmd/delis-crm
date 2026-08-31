@@ -1,4 +1,4 @@
-import { getSessionUser } from "@/server/auth";
+import { requireAccess } from "@/server/guard";
 import { getProducts, getAgentVisits } from "@/server/queries";
 import { db } from "@/db";
 import { redirect } from "next/navigation";
@@ -9,33 +9,34 @@ import { eq } from "drizzle-orm";
 export const dynamic = "force-dynamic";
 
 export default async function AgentPortalPage() {
-  const user = await getSessionUser();
-  if (!user) {
-    redirect("/");
-  }
+  const user = await requireAccess("/agent-portal");
+  if (user.role !== "agent") redirect("/");
 
-  // Находим соответствующего агента по email или первому в базе
-  let agent = (await db.select().from(s.agents).where(eq(s.agents.email, user.email)).limit(1))[0];
-  if (!agent) {
-    const allAgs = await db.select().from(s.agents).limit(1);
-    agent = allAgs[0];
-  }
-
-  if (!agent) {
+  // An agent account must be linked by Owner to exactly one agent profile.
+  if (!user.agentId) {
     return (
       <div className="min-h-screen grid place-items-center p-6 text-center">
         <div>
-          <h2 className="text-xl font-bold">Агент не найден</h2>
-          <p className="muted text-sm mt-1">Пожалуйста, создайте запись агента в CRM.</p>
+          <h2 className="text-xl font-bold">Профиль агента ещё не привязан</h2>
+          <p className="muted text-sm mt-1">Обратитесь к Owner: он привяжет ваш рабочий аккаунт к профилю агента.</p>
         </div>
       </div>
     );
   }
 
-  const [products, visits] = await Promise.all([
-    getProducts(),
-    getAgentVisits(agent.id),
-  ]);
+  const [agent] = await db.select().from(s.agents).where(eq(s.agents.id, user.agentId)).limit(1);
+  if (!agent) {
+    return (
+      <div className="min-h-screen grid place-items-center p-6 text-center">
+        <div>
+          <h2 className="text-xl font-bold">Профиль агента не найден</h2>
+          <p className="muted text-sm mt-1">Обратитесь к Owner для проверки привязки аккаунта.</p>
+        </div>
+      </div>
+    );
+  }
+
+  const [products, visits] = await Promise.all([getProducts(), getAgentVisits(agent.id)]);
 
   return (
     <AgentPortalClient

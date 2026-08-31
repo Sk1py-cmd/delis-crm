@@ -1,9 +1,11 @@
+import { requireAccess } from "@/server/guard";
 import { getCustomers, getProducts } from "@/server/queries";
 import { NewOrderForm } from "./NewOrderForm";
 
 export const dynamic = "force-dynamic";
 
 export default async function NewOrderPage() {
+  await requireAccess("/orders");
   const [customers, products] = await Promise.all([getCustomers(), getProducts()]);
   return (
     <NewOrderForm

@@ -1,3 +1,4 @@
+import { requireAccess } from "@/server/guard";
 import { getOrder } from "@/server/queries";
 import { notFound } from "next/navigation";
 import Link from "next/link";
@@ -8,6 +9,7 @@ import { OrderActions } from "./OrderActions";
 export const dynamic = "force-dynamic";
 
 export default async function OrderPage({ params }: { params: Promise<{ id: string }> }) {
+  await requireAccess("/orders");
   const { id } = await params;
   const data = await getOrder(Number(id));
   if (!data) notFound();

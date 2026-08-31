@@ -4,11 +4,11 @@ import Link from "next/link";
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
-import { Card, PageHeader, Badge, Modal, Avatar } from "@/shared/ui/kit";
+import { Card, PageHeader, Badge, Avatar } from "@/shared/ui/kit";
 import { useTheme, PRESET_PRIMARY, ThemeMode, Density } from "@/shared/store/theme";
 import {
-  Moon, Sun, MonitorSmartphone, RotateCcw, User, Lock, BellRing,
-  KeyRound, Eye, EyeOff, LogOut, Send, Smartphone, CheckCircle2, Pencil,
+  Moon, Sun, MonitorSmartphone, RotateCcw, User, BellRing,
+  LogOut, Send, Smartphone, CheckCircle2,
 } from "lucide-react";
 import { useToast } from "@/shared/ui/Toast";
 import { postManage } from "@/shared/lib/manage";
@@ -50,13 +50,8 @@ export function SettingsClient({ user, telegram }: { user: SettingsUser; telegra
   const toast = useToast();
   const router = useRouter();
 
-  const [pwModal, setPwModal] = useState(false);
-  const [loginModal, setLoginModal] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [currentPw, setCurrentPw] = useState("");
-  const [newPw, setNewPw] = useState("");
-  const [showPw, setShowPw] = useState(false);
-  const [newLogin, setNewLogin] = useState(user.login);
+  const canConfigureIntegrations = user.role === "owner" || user.role === "admin";
 
   const [tgChatId, setTgChatId] = useState(telegram.chatId);
   const [tgToken, setTgToken] = useState("");
@@ -86,40 +81,6 @@ export function SettingsClient({ user, telegram }: { user: SettingsUser; telegra
       toast("Уведомления подключены — тестовое сообщение отправлено в Telegram");
       setTgToken("");
       setEditToken(false);
-      router.refresh();
-    } catch (e) {
-      toast(e instanceof Error ? e.message : "Ошибка", "err");
-    }
-    setBusy(false);
-  };
-
-  const changePassword = async () => {
-    if (!currentPw.trim() || !newPw.trim()) { toast("Заполните оба поля", "err"); return; }
-    if (newPw.length < 4) { toast("Пароль минимум 4 символа", "err"); return; }
-    setBusy(true);
-    try {
-      await postManage("changePassword", { currentPassword: currentPw, newPassword: newPw });
-      toast("Пароль изменён. Используйте его при следующем входе");
-      setPwModal(false);
-      setCurrentPw("");
-      setNewPw("");
-    } catch (e) {
-      toast(e instanceof Error ? e.message : "Ошибка", "err");
-    }
-    setBusy(false);
-  };
-
-  const changeLogin = async () => {
-    const v = newLogin.trim().toLowerCase();
-    if (!/^[a-z0-9._-]{3,24}$/.test(v)) { toast("Логин: 3–24 символа, латиница/цифры/точка/дефис", "err"); return; }
-    if (v === user.login) { toast("Это ваш текущий логин", "err"); return; }
-    if (!currentPw.trim()) { toast("Введите текущий пароль для подтверждения", "err"); return; }
-    setBusy(true);
-    try {
-      await postManage("changeLogin", { newLogin: v, currentPassword: currentPw });
-      toast(`Логин изменён на @${v}. Входите с новым логином`);
-      setLoginModal(false);
-      setCurrentPw("");
       router.refresh();
     } catch (e) {
       toast(e instanceof Error ? e.message : "Ошибка", "err");
@@ -192,24 +153,15 @@ export function SettingsClient({ user, telegram }: { user: SettingsUser; telegra
           </div>
 
           <div className="flex flex-col gap-2.5">
-            <div className="flex items-center justify-between rounded-2xl p-3" style={{ background: "rgba(var(--table-row))" }}>
-              <div className="min-w-0">
-                <div className="text-[0.65rem] muted uppercase tracking-wider">{tt("settings.loginLabel")}</div>
-                <div className="text-sm font-semibold font-mono truncate">@{user.login}</div>
-              </div>
-              <button className="btn !text-xs !py-1.5 shrink-0" onClick={() => { setNewLogin(user.login); setCurrentPw(""); setLoginModal(true); }}>
-                <Pencil size={12} /> {tt("settings.changeLogin")}
-              </button>
+            <div className="rounded-2xl p-3" style={{ background: "rgba(var(--table-row))" }}>
+              <div className="text-[0.65rem] muted uppercase tracking-wider">{tt("settings.loginLabel")}</div>
+              <div className="text-sm font-semibold font-mono truncate">@{user.login}</div>
             </div>
 
-            <div className="flex items-center justify-between rounded-2xl p-3" style={{ background: "rgba(var(--table-row))" }}>
-              <div className="min-w-0">
-                <div className="text-[0.65rem] muted uppercase tracking-wider">{tt("settings.password")}</div>
-                <div className="text-sm font-semibold tracking-widest">••••••••</div>
-              </div>
-              <button className="btn !text-xs !py-1.5 shrink-0" onClick={() => { setCurrentPw(""); setNewPw(""); setPwModal(true); }}>
-                <KeyRound size={12} /> {tt("settings.changePassword")}
-              </button>
+            <div className="rounded-2xl p-3" style={{ background: "rgba(var(--table-row))" }}>
+              <div className="text-[0.65rem] muted uppercase tracking-wider">Доступ к аккаунту</div>
+              <div className="text-sm font-medium mt-1">Логин и пароль выдаёт Owner</div>
+              <p className="text-xs muted mt-1">Для смены или сброса пароля обратитесь к Owner. Самостоятельная смена пароля отключена.</p>
             </div>
 
             {user.email && (
@@ -222,6 +174,7 @@ export function SettingsClient({ user, telegram }: { user: SettingsUser; telegra
         </Card>
 
         {/* ─── Telegram уведомления ─── */}
+        {canConfigureIntegrations ? (
         <Card>
           <h3 className="font-semibold mb-1 flex items-center gap-2">
             <BellRing size={17} color="var(--warning)" /> {tt("settings.telegramNotif")}
@@ -281,6 +234,15 @@ export function SettingsClient({ user, telegram }: { user: SettingsUser; telegra
             </button>
           </div>
         </Card>
+        ) : (
+          <Card>
+            <h3 className="font-semibold mb-2 flex items-center gap-2">
+              <BellRing size={17} color="var(--warning)" /> {tt("settings.telegramNotif")}
+            </h3>
+            <p className="text-sm">Настройки интеграций доступны Owner и Admin.</p>
+            <p className="text-xs muted mt-2">Вы по-прежнему можете получать рабочие уведомления, но не можете менять токены и Chat ID.</p>
+          </Card>
+        )}
 
         {/* ─── Тема ─── */}
         <Card>
@@ -388,52 +350,6 @@ export function SettingsClient({ user, telegram }: { user: SettingsUser; telegra
         </Card>
       </div>
 
-      {/* Смена пароля */}
-      {pwModal && (
-        <Modal open onClose={() => setPwModal(false)} title={tt("settings.changePasswordTitle")}>
-          <div className="flex flex-col gap-3.5">
-            <div className="relative">
-              <Lock size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 muted" />
-              <input className="input !pl-10 !pr-10" type={showPw ? "text" : "password"} placeholder={tt("settings.currentPassword")}
-                value={currentPw} onChange={(e) => setCurrentPw(e.target.value)} autoComplete="current-password" />
-              <button type="button" className="absolute right-3 top-1/2 -translate-y-1/2 muted" onClick={() => setShowPw(!showPw)}>
-                {showPw ? <EyeOff size={14} /> : <Eye size={14} />}
-              </button>
-            </div>
-            <input className="input" type="password" placeholder={tt("settings.newPassword")}
-              value={newPw} onChange={(e) => setNewPw(e.target.value)} autoComplete="new-password" />
-            <button className="btn btn-primary justify-center" disabled={busy} onClick={changePassword}>
-              {busy ? tt("settings.saving") : tt("settings.changePasswordTitle")}
-            </button>
-          </div>
-        </Modal>
-      )}
-
-      {/* Смена логина */}
-      {loginModal && (
-        <Modal open onClose={() => setLoginModal(false)} title={tt("settings.changeLoginTitle")}>
-          <div className="flex flex-col gap-3.5">
-            <div>
-              <label className="text-xs muted uppercase tracking-wider block mb-1">{tt("settings.currentLogin")}</label>
-              <div className="input font-mono text-sm opacity-60">@{user.login}</div>
-            </div>
-            <div>
-              <label className="text-xs muted uppercase tracking-wider block mb-1">{tt("settings.newLogin")}</label>
-              <input className="input font-mono" placeholder="otabek" value={newLogin}
-                onChange={(e) => setNewLogin(e.target.value.toLowerCase().replace(/[^a-z0-9._-]/g, ""))} />
-              <p className="text-xs muted mt-1">{tt("settings.newLoginHint")}</p>
-            </div>
-            <div className="relative">
-              <Lock size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 muted" />
-              <input className="input !pl-10" type="password" placeholder={tt("settings.confirmPassword")}
-                value={currentPw} onChange={(e) => setCurrentPw(e.target.value)} />
-            </div>
-            <button className="btn btn-primary justify-center" disabled={busy} onClick={changeLogin}>
-              {busy ? tt("settings.saving") : tt("settings.changeLoginTitle")}
-            </button>
-          </div>
-        </Modal>
-      )}
     </>
   );
 }

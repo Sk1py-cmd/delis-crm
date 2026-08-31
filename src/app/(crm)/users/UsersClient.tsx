@@ -2,10 +2,11 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { AnimatePresence, motion } from "framer-motion";
-import { UserPlus, KeyRound, Trash2, ShieldCheck } from "lucide-react";
+import { AnimatePresence } from "framer-motion";
+import { Ban, KeyRound, ShieldCheck, Trash2, Unlock, UserCog, UserPlus } from "lucide-react";
 import { Card, Badge, Avatar, Modal, PageHeader } from "@/shared/ui/kit";
 import { ROLE_LABEL, dt } from "@/shared/lib/format";
+import { STAFF_ROLES } from "@/shared/config/access";
 import { useToast } from "@/shared/ui/Toast";
 import { postManage } from "@/shared/lib/manage";
 import { useT } from "@/shared/i18n/useT";
@@ -16,13 +17,20 @@ export interface UserLite {
   login: string;
   email: string;
   role: string;
-  twoFa: boolean;
+  status: string;
+  agentId: number | null;
   lastIp: string;
   device: string;
   lastLoginAt: string;
 }
 
-const ROLES = Object.keys(ROLE_LABEL);
+export interface AgentProfileLite {
+  id: number;
+  name: string;
+  region: string;
+  email: string;
+}
+
 const ROLE_COLOR: Record<string, string> = {
   owner: "#f59e0b",
   admin: "#8b5cf6",
@@ -34,65 +42,123 @@ const ROLE_COLOR: Record<string, string> = {
   operator: "#a855f7",
 };
 
-const PERMS = ["Дашборд", "Заказы", "Товары", "Склад", "Клиенты", "Чат", "Финансы", "Аналитика", "Пользователи", "Настройки"];
-const MATRIX: Record<string, number[]> = {
-  owner: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
-  admin: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
-  manager: [1, 1, 1, 1, 1, 1, 0, 1, 0, 0],
-  warehouse: [1, 1, 1, 1, 0, 0, 0, 0, 0, 0],
-  agent: [1, 1, 1, 0, 1, 1, 0, 0, 0, 0],
-  support: [1, 1, 0, 0, 1, 1, 0, 0, 0, 0],
-  moderator: [1, 0, 1, 0, 1, 1, 0, 1, 0, 0],
-  operator: [1, 1, 0, 0, 1, 1, 0, 0, 0, 0],
-};
+const EMPTY_FORM = { name: "", login: "", email: "", role: "manager", password: "", agentId: "" };
 
-export function UsersClient({ users, currentRole, audit }: { users: UserLite[]; currentRole: string; audit: { id: number; actor: string; action: string; entity: string; createdAt: string }[] }) {
-  const canManage = currentRole === "owner" || currentRole === "admin";
+type InviteForm = typeof EMPTY_FORM;
+
+export function UsersClient({
+  users,
+  currentRole,
+  audit,
+  agents,
+}: {
+  users: UserLite[];
+  currentRole: string;
+  audit: { id: number; actor: string; action: string; entity: string; createdAt: string }[];
+  agents: AgentProfileLite[];
+}) {
+  const canManage = currentRole === "owner";
   const [invite, setInvite] = useState(false);
   const [pwFor, setPwFor] = useState<UserLite | null>(null);
-  const [form, setForm] = useState({ name: "", login: "", email: "", role: "manager", password: "" });
+  const [roleFor, setRoleFor] = useState<UserLite | null>(null);
+  const [form, setForm] = useState<InviteForm>(EMPTY_FORM);
   const [pw, setPw] = useState("");
+  const [newRole, setNewRole] = useState("manager");
+  const [newAgentId, setNewAgentId] = useState("");
   const [busy, setBusy] = useState(false);
-  const [matrix, setMatrix] = useState(MATRIX);
   const toast = useToast();
   const tr = useT();
   const router = useRouter();
 
   const inviteUser = async () => {
+    if (!form.name.trim() || !form.login.trim() || !form.password) {
+      toast("Заполните имя, логин и пароль", "err");
+      return;
+    }
+    if (form.password.length < 10) {
+      toast("Пароль должен содержать не менее 10 символов", "err");
+      return;
+    }
+    if (form.role === "agent" && !form.agentId) {
+      toast("Для Agent выберите профиль агента", "err");
+      return;
+    }
     setBusy(true);
     try {
-      await postManage("createUser", form);
-      toast(`Аккаунт @${form.login} создан — сотрудник может войти`);
+      await postManage("createUser", {
+        ...form,
+        agentId: form.role === "agent" ? Number(form.agentId) : undefined,
+      });
+      toast(`Аккаунт @${form.login.trim()} создан — сотрудник может войти`);
       setInvite(false);
-      setForm({ name: "", login: "", email: "", role: "manager", password: "" });
+      setForm(EMPTY_FORM);
       router.refresh();
     } catch (e) {
       toast(e instanceof Error ? e.message : "Ошибка", "err");
+    } finally {
+      setBusy(false);
     }
-    setBusy(false);
   };
 
   const resetPw = async () => {
     if (!pwFor) return;
+    if (pw.length < 10) {
+      toast("Пароль должен содержать не менее 10 символов", "err");
+      return;
+    }
     setBusy(true);
     try {
       await postManage("resetPassword", { id: pwFor.id, password: pw });
-      toast(`Пароль ${pwFor.name} обновлён`);
+      toast(`Пароль для ${pwFor.name} обновлён. Все активные сессии сотрудника завершены.`);
       setPwFor(null);
       setPw("");
-    } catch (e) {
-      toast(e instanceof Error ? e.message : "Ошибка", "err");
-    }
-    setBusy(false);
-  };
-
-  const act = async (action: string, data: Record<string, unknown>, msg: string) => {
-    try {
-      await postManage(action, data);
-      toast(msg);
       router.refresh();
     } catch (e) {
       toast(e instanceof Error ? e.message : "Ошибка", "err");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const openRoleEditor = (user: UserLite) => {
+    setRoleFor(user);
+    setNewRole(user.role);
+    setNewAgentId(user.agentId ? String(user.agentId) : "");
+  };
+
+  const saveRole = async () => {
+    if (!roleFor) return;
+    if (newRole === "agent" && !newAgentId) {
+      toast("Для Agent выберите профиль агента", "err");
+      return;
+    }
+    setBusy(true);
+    try {
+      await postManage("updateUserRole", {
+        id: roleFor.id,
+        role: newRole,
+        agentId: newRole === "agent" ? Number(newAgentId) : undefined,
+      });
+      toast(`Роль ${roleFor.name} обновлена. Активные сессии сотрудника завершены.`);
+      setRoleFor(null);
+      router.refresh();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "Ошибка", "err");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const act = async (action: string, data: Record<string, unknown>, message: string) => {
+    setBusy(true);
+    try {
+      await postManage(action, data);
+      toast(message);
+      router.refresh();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "Ошибка", "err");
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -100,14 +166,14 @@ export function UsersClient({ users, currentRole, audit }: { users: UserLite[]; 
     <>
       <PageHeader
         title={tr("users.title")}
-        subtitle={tr("users.subtitle")}
+        subtitle="Только Owner создаёт сотрудников, назначает роли, блокирует доступ и сбрасывает пароли."
         actions={
           canManage ? (
             <button className="btn btn-primary" onClick={() => setInvite(true)}>
               <UserPlus size={15} /> {tr("users.createAccount")}
             </button>
           ) : (
-            <Badge color="#f97316">Создание аккаунтов доступно только Owner/Admin</Badge>
+            <Badge color="#f97316">Управление аккаунтами доступно только Owner</Badge>
           )
         }
       />
@@ -121,60 +187,73 @@ export function UsersClient({ users, currentRole, audit }: { users: UserLite[]; 
                 <tr>
                   <th>{tr("users.employees")}</th>
                   <th>{tr("users.role")}</th>
-                  <th>2FA</th>
+                  <th>Статус</th>
                   <th className="hidden lg:table-cell">{tr("users.device")}</th>
                   <th>{tr("users.lastLogin")}</th>
-                  {canManage && <th />}
+                  {canManage && <th aria-label="Действия" />}
                 </tr>
               </thead>
               <tbody>
-                {users.map((u) => (
-                  <tr key={u.id}>
-                    <td>
-                      <div className="flex items-center gap-2.5 h-[var(--row)]">
-                        <Avatar name={u.name} color={ROLE_COLOR[u.role]} size={32} />
-                        <div className="min-w-0">
-                          <div className="text-[0.85rem] truncate max-w-[180px]">{u.name}</div>
-                          <div className="text-xs muted truncate max-w-[180px]">
-                            @{u.login || "—"}{u.email ? ` · ${u.email}` : ""}
+                {users.map((user) => {
+                  const blocked = user.status === "blocked";
+                  return (
+                    <tr key={user.id} className={blocked ? "opacity-60" : undefined}>
+                      <td>
+                        <div className="flex items-center gap-2.5 h-[var(--row)]">
+                          <Avatar name={user.name} color={ROLE_COLOR[user.role] ?? "#64748b"} size={32} />
+                          <div className="min-w-0">
+                            <div className="text-[0.85rem] truncate max-w-[180px]">{user.name}</div>
+                            <div className="text-xs muted truncate max-w-[180px]">
+                              @{user.login || "—"}{user.email ? ` · ${user.email}` : ""}
+                            </div>
                           </div>
                         </div>
-                      </div>
-                    </td>
-                    <td>
-                      <Badge color={ROLE_COLOR[u.role]}>{ROLE_LABEL[u.role] ?? u.role}</Badge>
-                    </td>
-                    <td>
-                      {canManage ? (
-                        <button onClick={() => act("toggle2fa", { id: u.id }, `2FA ${u.twoFa ? "выключена" : "включена"} для ${u.name}`)}>
-                          <Badge color={u.twoFa ? "#22c55e" : "#ef4444"}>{u.twoFa ? "Вкл" : "Выкл"}</Badge>
-                        </button>
-                      ) : (
-                        <Badge color={u.twoFa ? "#22c55e" : "#ef4444"}>{u.twoFa ? "Вкл" : "Выкл"}</Badge>
-                      )}
-                    </td>
-                    <td className="muted text-xs hidden lg:table-cell max-w-[160px] truncate">{u.device}</td>
-                    <td className="muted whitespace-nowrap text-xs">{dt(u.lastLoginAt)}</td>
-                    {canManage && (
-                      <td>
-                        <div className="flex gap-1">
-                          <button className="btn !px-2 !py-1" title="Сменить пароль" onClick={() => setPwFor(u)}>
-                            <KeyRound size={13} />
-                          </button>
-                          {u.role !== "owner" && (
-                            <button
-                              className="btn !px-2 !py-1"
-                              title="Удалить"
-                              onClick={() => act("deleteUser", { id: u.id }, `Аккаунт ${u.email} удалён`)}
-                            >
-                              <Trash2 size={13} color="var(--error)" />
-                            </button>
-                          )}
-                        </div>
                       </td>
-                    )}
-                  </tr>
-                ))}
+                      <td>
+                        <Badge color={ROLE_COLOR[user.role] ?? "#64748b"}>{ROLE_LABEL[user.role] ?? user.role}</Badge>
+                      </td>
+                      <td>
+                        <Badge color={blocked ? "#ef4444" : "#22c55e"}>{blocked ? "Заблокирован" : "Активен"}</Badge>
+                      </td>
+                      <td className="muted text-xs hidden lg:table-cell max-w-[160px] truncate">{user.device || "—"}</td>
+                      <td className="muted whitespace-nowrap text-xs">{dt(user.lastLoginAt)}</td>
+                      {canManage && (
+                        <td>
+                          <div className="flex gap-1 justify-end">
+                            <button className="btn !px-2 !py-1" title="Сбросить пароль" onClick={() => { setPwFor(user); setPw(""); }}>
+                              <KeyRound size={13} />
+                            </button>
+                            {user.role !== "owner" && (
+                              <>
+                                <button className="btn !px-2 !py-1" title="Назначить роль" onClick={() => openRoleEditor(user)}>
+                                  <UserCog size={13} />
+                                </button>
+                                <button
+                                  className="btn !px-2 !py-1"
+                                  title={blocked ? "Разблокировать" : "Заблокировать"}
+                                  onClick={() => act("setUserStatus", { id: user.id, status: blocked ? "active" : "blocked" }, blocked ? `Аккаунт ${user.name} разблокирован` : `Аккаунт ${user.name} заблокирован`)}
+                                >
+                                  {blocked ? <Unlock size={13} color="#22c55e" /> : <Ban size={13} color="#f59e0b" />}
+                                </button>
+                                <button
+                                  className="btn !px-2 !py-1"
+                                  title="Удалить"
+                                  onClick={() => {
+                                    if (window.confirm(`Удалить аккаунт ${user.name}? Это действие нельзя отменить.`)) {
+                                      void act("deleteUser", { id: user.id }, `Аккаунт ${user.name} удалён`);
+                                    }
+                                  }}
+                                >
+                                  <Trash2 size={13} color="var(--error)" />
+                                </button>
+                              </>
+                            )}
+                          </div>
+                        </td>
+                      )}
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -185,15 +264,15 @@ export function UsersClient({ users, currentRole, audit }: { users: UserLite[]; 
             <ShieldCheck size={16} color="var(--success)" /> Audit Log
           </h3>
           <div className="flex flex-col gap-3 max-h-[420px] overflow-y-auto">
-            {audit.map((a) => (
-              <div key={a.id} className="flex gap-3">
-                <Avatar name={a.actor} color="var(--accent)" size={30} />
+            {audit.map((entry) => (
+              <div key={entry.id} className="flex gap-3">
+                <Avatar name={entry.actor} color="var(--accent)" size={30} />
                 <div className="min-w-0">
                   <div className="text-[0.8rem]">
-                    <b>{a.actor}</b> <span className="muted">{a.action}</span>
+                    <b>{entry.actor}</b> <span className="muted">{entry.action}</span>
                   </div>
                   <div className="text-xs muted truncate">
-                    {a.entity} · {dt(a.createdAt)}
+                    {entry.entity} · {dt(entry.createdAt)}
                   </div>
                 </div>
               </div>
@@ -202,46 +281,18 @@ export function UsersClient({ users, currentRole, audit }: { users: UserLite[]; 
         </Card>
       </div>
 
-      <Card hover={false} className="!p-0">
-        <h3 className="font-semibold card-pad pb-2">{tr("users.permissionMatrix")}</h3>
-        <div className="overflow-x-auto">
-          <table className="min-w-[760px]">
-            <thead>
-              <tr>
-                <th>{tr("users.role")}</th>
-                {PERMS.map((p) => (
-                  <th key={p}>{p}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {ROLES.map((r) => (
-                <tr key={r}>
-                  <td>
-                    <Badge color={ROLE_COLOR[r]}>{ROLE_LABEL[r]}</Badge>
-                  </td>
-                  {matrix[r].map((v, i) => (
-                    <td key={i}>
-                      <button
-                        onClick={() => {
-                          if (!canManage) {
-                            toast("Изменение прав доступно только Owner/Admin", "err");
-                            return;
-                          }
-                          setMatrix((m) => ({ ...m, [r]: m[r].map((x, j) => (j === i ? (x ? 0 : 1) : x)) }));
-                          toast(`Право «${PERMS[i]}» для ${ROLE_LABEL[r]} ${v ? "отключено" : "включено"}`);
-                        }}
-                        className="inline-block w-9 h-5 rounded-full relative"
-                        style={{ background: v ? "linear-gradient(120deg,var(--primary),var(--accent))" : "rgba(var(--border))" }}
-                      >
-                        <motion.span layout className="absolute top-0.5 w-4 h-4 rounded-full bg-white" animate={{ left: v ? 18 : 3 }} transition={{ type: "spring", stiffness: 500, damping: 32 }} />
-                      </button>
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
+      <Card>
+        <h3 className="font-semibold flex items-center gap-2">
+          <ShieldCheck size={16} color="var(--success)" /> Серверная модель прав
+        </h3>
+        <p className="text-sm muted mt-2">
+          Права ролей задаются централизованно на сервере и проверяются для страниц и API. Их нельзя изменить переключателями в браузере.
+        </p>
+        <div className="flex flex-wrap gap-2 mt-4">
+          <Badge color={ROLE_COLOR.owner}>Owner: полный доступ и управление аккаунтами</Badge>
+          {STAFF_ROLES.map((role) => (
+            <Badge key={role} color={ROLE_COLOR[role]}>{ROLE_LABEL[role] ?? role}</Badge>
+          ))}
         </div>
       </Card>
 
@@ -254,28 +305,53 @@ export function UsersClient({ users, currentRole, audit }: { users: UserLite[]; 
                 <span className="absolute left-4 top-1/2 -translate-y-1/2 muted text-sm">@</span>
                 <input className="input !pl-9" placeholder="Логин для входа (например: aziza)" value={form.login} onChange={(e) => setForm({ ...form, login: e.target.value })} />
               </div>
-              <select className="input" value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}>
-                {ROLES.filter((r) => r !== "owner").map((r) => (
-                  <option key={r} value={r}>
-                    {ROLE_LABEL[r]}
-                  </option>
+              <select className="input" value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value, agentId: e.target.value === "agent" ? form.agentId : "" })}>
+                {STAFF_ROLES.map((role) => (
+                  <option key={role} value={role}>{ROLE_LABEL[role] ?? role}</option>
                 ))}
               </select>
-              <input className="input" type="password" placeholder="Пароль (мин. 4 символа)" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} />
-              <input className="input" placeholder="Email (необязательно)" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} />
+              {form.role === "agent" && (
+                <select className="input" value={form.agentId} onChange={(e) => setForm({ ...form, agentId: e.target.value })}>
+                  <option value="">Выберите профиль агента</option>
+                  {agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name} · {agent.region}</option>)}
+                </select>
+              )}
+              <input className="input" type="password" autoComplete="new-password" placeholder="Стартовый пароль (минимум 10 символов)" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} />
+              <input className="input" type="email" placeholder="Email (необязательно)" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} />
               <button className="btn btn-primary justify-center" disabled={busy} onClick={inviteUser}>
                 {busy ? "Создаём…" : "Создать аккаунт"}
               </button>
-              <p className="text-xs muted text-center">Сотрудник войдёт по этому логину и паролю. Сменить пароль может только Owner/Admin.</p>
+              <p className="text-xs muted text-center">Owner выдаёт стартовый пароль и при необходимости сбрасывает его. Сотрудник не может изменить пароль сам.</p>
             </div>
           </Modal>
         )}
-        {pwFor && (
-          <Modal open onClose={() => setPwFor(null)} title={`Новый пароль: ${pwFor.name}`}>
+
+        {roleFor && (
+          <Modal open onClose={() => setRoleFor(null)} title={`Роль сотрудника: ${roleFor.name}`}>
             <div className="flex flex-col gap-3.5">
-              <input className="input" type="password" placeholder="Новый пароль" value={pw} onChange={(e) => setPw(e.target.value)} />
+              <select className="input" value={newRole} onChange={(e) => { setNewRole(e.target.value); if (e.target.value !== "agent") setNewAgentId(""); }}>
+                {STAFF_ROLES.map((role) => <option key={role} value={role}>{ROLE_LABEL[role] ?? role}</option>)}
+              </select>
+              {newRole === "agent" && (
+                <select className="input" value={newAgentId} onChange={(e) => setNewAgentId(e.target.value)}>
+                  <option value="">Выберите профиль агента</option>
+                  {agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name} · {agent.region}</option>)}
+                </select>
+              )}
+              <button className="btn btn-primary justify-center" disabled={busy} onClick={saveRole}>
+                {busy ? "Сохраняем…" : "Сохранить роль"}
+              </button>
+            </div>
+          </Modal>
+        )}
+
+        {pwFor && (
+          <Modal open onClose={() => setPwFor(null)} title={`Сброс пароля: ${pwFor.name}`}>
+            <div className="flex flex-col gap-3.5">
+              <input className="input" type="password" autoComplete="new-password" placeholder="Новый пароль (минимум 10 символов)" value={pw} onChange={(e) => setPw(e.target.value)} />
+              <p className="text-xs muted">После сброса все активные сессии этого сотрудника будут завершены.</p>
               <button className="btn btn-primary justify-center" disabled={busy} onClick={resetPw}>
-                {busy ? "Сохраняем…" : "Сменить пароль"}
+                {busy ? "Сохраняем…" : "Сбросить пароль"}
               </button>
             </div>
           </Modal>

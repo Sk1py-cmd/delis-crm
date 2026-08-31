@@ -1,9 +1,11 @@
+import { requireAccess } from "@/server/guard";
 import { getCustomers } from "@/server/queries";
 import { CustomersClient } from "./CustomersClient";
 
 export const dynamic = "force-dynamic";
 
 export default async function CustomersPage() {
+  await requireAccess("/customers");
   const rows = await getCustomers();
   return (
     <CustomersClient

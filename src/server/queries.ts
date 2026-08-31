@@ -1,7 +1,7 @@
 import { db } from "@/db";
 import * as s from "@/db/schema";
 import { ensureSeed } from "@/db/seed";
-import { desc, eq, sql, and, gte } from "drizzle-orm";
+import { desc, eq, sql, and, gte, inArray } from "drizzle-orm";
 
 export type Product = typeof s.products.$inferSelect;
 export type Order = typeof s.orders.$inferSelect;
@@ -446,7 +446,7 @@ export async function createAgentStoreOrder(input: {
   const prods = await db
     .select()
     .from(s.products)
-    .where(sql`${s.products.id} = any(${sql.raw(`ARRAY[${ids.join(",")}]::int[]`)})`);
+    .where(inArray(s.products.id, [...new Set(ids)]));
   const map = new Map(prods.map((p) => [p.id, p]));
 
   let total = 0;
@@ -781,8 +781,22 @@ export async function adjustStock(productId: number, kind: string, qty: number, 
   await recordSyncEvent({ source: "crm", target: "miniapp", entity: "stock", action: "availability_updated", payload: { productId } });
 }
 
-export async function createOrderQuick(customerId: number, productId: number, qty: number, payment = "click") {
-  const [p] = await db.select().from(s.products).where(eq(s.products.id, productId));
+export async function createOrderQuick(
+  customerId: number,
+  productId: number,
+  qty: number,
+  payment = "click",
+  actor = "CRM",
+) {
+  const [[customer], [p]] = await Promise.all([
+    db.select().from(s.customers).where(eq(s.customers.id, customerId)).limit(1),
+    db.select().from(s.products).where(eq(s.products.id, productId)).limit(1),
+  ]);
+  if (!customer) throw new Error("Клиент не найден");
+  if (!p) throw new Error("Товар не найден");
+  if (!Number.isSafeInteger(qty) || qty < 1) throw new Error("Некорректное количество");
+  if (p.stock < qty) throw new Error(`Недостаточно товара на складе: доступно ${p.stock} шт.`);
+
   const total = Number(p.price) * qty;
   const [count] = await db.select({ c: sql<string>`count(*)` }).from(s.orders);
   const [order] = await db
@@ -795,36 +809,66 @@ export async function createOrderQuick(customerId: number, productId: number, qt
       payment,
       total: String(total),
       profit: String(total - Number(p.cost) * qty),
-      timeline: [{ status: "new", at: new Date().toISOString(), by: "CRM" }],
+      timeline: [{ status: "new", at: new Date().toISOString(), by: actor }],
     })
     .returning();
+
   await db.insert(s.orderItems).values({ orderId: order.id, productId, name: p.name, qty, price: p.price });
   await adjustStock(productId, "out", qty, `Заказ ${order.number}`);
+  await db.update(s.products).set({ sold: sql`sold + ${qty}` }).where(eq(s.products.id, productId));
+  await db
+    .update(s.customers)
+    .set({
+      ordersCount: sql`orders_count + 1`,
+      totalSpent: sql`total_spent + ${total}`,
+      lastActiveAt: new Date(),
+    })
+    .where(eq(s.customers.id, customerId));
   await recordSyncEvent({ source: "crm", target: "telegram_bot", entity: "order", action: "order_created", payload: { order: order.number, customerId } });
   await recordSyncEvent({ source: "crm", target: "finance", entity: "order", action: "revenue_planned", payload: { order: order.number, total } });
 
-  // Отправляем уведомление владельцу в Telegram
   await notifyOwnerAboutOrder(order.number, String(total), payment, p.name);
-
   return order;
 }
 
-export async function createMultiOrder(customerId: number, items: { productId: number; qty: number }[]) {
-  const productIds = items.map((it) => it.productId);
-  const prods = await db.select().from(s.products).where(sql`${s.products.id} = any(${sql.raw(`ARRAY[${productIds.join(",")}]::int[]`)})`);
+export async function createMultiOrder(
+  customerId: number,
+  items: { productId: number; qty: number }[],
+  actor = "CRM",
+) {
+  if (items.length === 0) throw new Error("Добавьте хотя бы одну позицию");
+  for (const item of items) {
+    if (!Number.isSafeInteger(item.productId) || item.productId < 1 || !Number.isSafeInteger(item.qty) || item.qty < 1) {
+      throw new Error("Некорректные позиции заказа");
+    }
+  }
+
+  const productIds = [...new Set(items.map((item) => item.productId))];
+  const [[customer], prods] = await Promise.all([
+    db.select().from(s.customers).where(eq(s.customers.id, customerId)).limit(1),
+    db.select().from(s.products).where(inArray(s.products.id, productIds)),
+  ]);
+  if (!customer) throw new Error("Клиент не найден");
+  if (prods.length !== productIds.length) throw new Error("Один или несколько товаров не найдены");
+
   const prodMap = new Map(prods.map((p) => [p.id, p]));
+  const qtyByProduct = new Map<number, number>();
+  for (const item of items) qtyByProduct.set(item.productId, (qtyByProduct.get(item.productId) ?? 0) + item.qty);
+  for (const [productId, orderedQty] of qtyByProduct) {
+    const product = prodMap.get(productId)!;
+    if (product.stock < orderedQty) {
+      throw new Error(`Недостаточно товара «${product.name}»: доступно ${product.stock} шт.`);
+    }
+  }
 
   let total = 0;
   let costTotal = 0;
   const orderItems: { productId: number; name: string; qty: number; price: string }[] = [];
-
-  for (const it of items) {
-    const p = prodMap.get(it.productId);
-    if (!p) continue;
-    const qty = Math.max(1, it.qty);
-    total += Number(p.price) * qty;
-    costTotal += Number(p.cost) * qty;
-    orderItems.push({ productId: p.id, name: p.name, qty, price: p.price });
+  for (const item of items) {
+    const product = prodMap.get(item.productId)!;
+    total += Number(product.price) * item.qty;
+    costTotal += Number(product.cost) * item.qty;
+    orderItems.push({ productId: product.id, name: product.name, qty: item.qty, price: product.price });
   }
 
   const [count] = await db.select({ c: sql<string>`count(*)` }).from(s.orders);
@@ -837,17 +881,23 @@ export async function createMultiOrder(customerId: number, items: { productId: n
       channel: "crm",
       total: String(total),
       profit: String(total - costTotal),
-      timeline: [{ status: "new", at: new Date().toISOString(), by: "CRM" }],
+      timeline: [{ status: "new", at: new Date().toISOString(), by: actor }],
     })
     .returning();
 
-  if (orderItems.length > 0) {
-    await db.insert(s.orderItems).values(orderItems.map((it) => ({ ...it, orderId: order.id })));
+  await db.insert(s.orderItems).values(orderItems.map((item) => ({ ...item, orderId: order.id })));
+  for (const [productId, orderedQty] of qtyByProduct) {
+    await adjustStock(productId, "out", orderedQty, `Заказ ${order.number}`);
+    await db.update(s.products).set({ sold: sql`sold + ${orderedQty}` }).where(eq(s.products.id, productId));
   }
-
-  for (const it of items) {
-    await adjustStock(it.productId, "out", Math.max(1, it.qty), `Заказ ${order.number}`);
-  }
+  await db
+    .update(s.customers)
+    .set({
+      ordersCount: sql`orders_count + 1`,
+      totalSpent: sql`total_spent + ${total}`,
+      lastActiveAt: new Date(),
+    })
+    .where(eq(s.customers.id, customerId));
 
   await recordSyncEvent({ source: "crm", target: "telegram_bot", entity: "order", action: "order_created", payload: { order: order.number, customerId, items: items.length } });
   await recordSyncEvent({ source: "crm", target: "finance", entity: "order", action: "revenue_planned", payload: { order: order.number, total } });
@@ -1050,7 +1100,7 @@ export async function createPurchaseOrder(input: {
   const prods = await db
     .select()
     .from(s.products)
-    .where(sql`${s.products.id} = any(${sql.raw(`ARRAY[${ids.join(",")}]::int[]`)})`);
+    .where(inArray(s.products.id, [...new Set(ids)]));
   const map = new Map(prods.map((p) => [p.id, p]));
 
   let total = 0;

@@ -9,7 +9,7 @@ import { useLocale } from "@/shared/store/locale";
 import { LOCALES, type Locale } from "@/shared/i18n/locales";
 
 export function LoginScreen() {
-  const [login, setLogin] = useState("owner");
+  const [login, setLogin] = useState("");
   const [password, setPassword] = useState("");
   const [show, setShow] = useState(false);
   const [error, setError] = useState("");
@@ -22,7 +22,8 @@ export function LoginScreen() {
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     const normalizedLogin = login.trim().toLowerCase();
-    const normalizedPassword = password.trim();
+    // Passwords are opaque credentials; never trim or otherwise transform them client-side.
+    const normalizedPassword = password;
     setError("");
 
     if (!normalizedLogin || !normalizedPassword) {

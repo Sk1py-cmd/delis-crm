@@ -1,3 +1,4 @@
+import { requireAccess } from "@/server/guard";
 import { getCustomer } from "@/server/queries";
 import { notFound } from "next/navigation";
 import Link from "next/link";
@@ -8,6 +9,7 @@ import { NoteSaver } from "./NoteSaver";
 export const dynamic = "force-dynamic";
 
 export default async function CustomerPage({ params }: { params: Promise<{ id: string }> }) {
+  await requireAccess("/customers");
   const { id } = await params;
   const data = await getCustomer(Number(id));
   if (!data) notFound();

@@ -1,6 +1,7 @@
 export async function postManage(action: string, data: Record<string, unknown> = {}) {
   const res = await fetch("/api/manage", {
     method: "POST",
+    credentials: "same-origin",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ action, data }),
   });

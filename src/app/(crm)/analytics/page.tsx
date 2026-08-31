@@ -1,3 +1,4 @@
+import { requireAccess } from "@/server/guard";
 import { getAnalytics } from "@/server/queries";
 import { Card, PageHeader, Badge, Progress, Avatar } from "@/shared/ui/kit";
 import { StatGrid } from "@/widgets/StatCard";
@@ -7,6 +8,7 @@ import { money, num, SOURCE_LABEL, statusMeta } from "@/shared/lib/format";
 export const dynamic = "force-dynamic";
 
 export default async function AnalyticsPage() {
+  await requireAccess("/analytics");
   const a = await getAnalytics();
   const revenue = Number(a.totals.revenue);
   const profit = Number(a.totals.profit);

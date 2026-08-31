@@ -7,14 +7,14 @@ import Link from "next/link";
 import { CompanyOS } from "@/widgets/CompanyOS";
 import { LiveClock } from "@/widgets/LiveClock";
 import { TasksToday } from "@/widgets/TasksToday";
-import { getSessionUser } from "@/server/auth";
+import { requireAccess } from "@/server/guard";
 
 export const dynamic = "force-dynamic";
 
 import { redirect } from "next/navigation";
 
 export default async function DashboardPage() {
-  const session = await getSessionUser();
+  const session = await requireAccess("/");
   if (session?.role === "agent") {
     redirect("/agent-portal");
   }

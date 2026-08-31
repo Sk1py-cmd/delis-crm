@@ -1,7 +1,7 @@
 import { db } from "@/db";
 import * as s from "@/db/schema";
-import { sql } from "drizzle-orm";
-import { hashPassword } from "@/server/password";
+import { eq, sql } from "drizzle-orm";
+import { hashPassword, passwordValidationError } from "@/server/password";
 
 let seeded: Promise<void> | null = null;
 
@@ -16,12 +16,34 @@ create table if not exists transactions (id serial primary key, kind text not nu
 create table if not exists messages (id serial primary key, customer_id integer not null, body text not null, from_admin boolean not null default false, kind text not null default 'text', read_at timestamp, created_at timestamp not null default now());
 create table if not exists templates (id serial primary key, title text not null, body text not null);
 create table if not exists stock_moves (id serial primary key, product_id integer not null, kind text not null, qty integer not null default 0, note text not null default '', created_at timestamp not null default now());
-create table if not exists users (id serial primary key, name text not null, email text not null, role text not null default 'manager', status text not null default 'active', last_ip text not null default '94.158.0.1', device text not null default 'MacBook Pro · Chrome', two_fa boolean not null default false, last_login_at timestamp not null default now());
+create table if not exists users (id serial primary key, name text not null, email text not null default '', role text not null default 'manager', status text not null default 'active', last_ip text not null default '', device text not null default '', two_fa boolean not null default false, owner_initialized_at timestamp, agent_id integer unique, login text not null default '', password_hash text not null default '', last_login_at timestamp not null default now());
 create table if not exists activity (id serial primary key, actor text not null, action text not null, entity text not null default '', created_at timestamp not null default now());
 create table if not exists content_blocks (id serial primary key, surface text not null, "key" text not null, title text not null, body text not null default '', enabled boolean not null default true, updated_at timestamp not null default now());
 create table if not exists sessions (id serial primary key, token text not null unique, user_id integer not null, device text not null default '', expires_at timestamp not null, created_at timestamp not null default now());
 alter table users add column if not exists password_hash text not null default '';
 alter table users add column if not exists login text not null default '';
+alter table users add column if not exists agent_id integer;
+alter table users add column if not exists owner_initialized_at timestamp;
+alter table users alter column last_ip set default '';
+alter table users alter column device set default '';
+-- Legacy demo data had a non-login placeholder Owner. Keep the oldest existing owner
+-- for one-time environment bootstrap and demote duplicates before enforcing singleton.
+update users set role = 'admin' where role = 'owner' and login = '';
+with ranked_owners as (
+  select id, row_number() over (order by id) as position from users where role = 'owner'
+)
+update users set role = 'admin' where id in (select id from ranked_owners where position > 1);
+-- Old versions could issue duplicate login values. Preserve rows under a unique legacy login
+-- so the Owner can reset them instead of preventing the application from starting.
+with ranked_logins as (
+  select id, row_number() over (partition by lower(login) order by id) as position
+  from users where login <> ''
+)
+update users set login = 'legacy-migrated-' || id::text
+where id in (select id from ranked_logins where position > 1);
+create unique index if not exists users_login_lower_unique on users (lower(login)) where login <> '';
+create unique index if not exists users_agent_id_unique on users (agent_id) where agent_id is not null;
+create unique index if not exists users_single_owner_unique on users ((role)) where role = 'owner';
 create table if not exists sync_events (id serial primary key, source text not null default 'crm', target text not null default 'all', entity text not null, action text not null, status text not null default 'synced', payload jsonb not null default '{}'::jsonb, created_at timestamp not null default now());
 create table if not exists broadcasts (id serial primary key, title text not null default '', body text not null default '', recipients integer not null default 0, channel text not null default 'telegram', status text not null default 'sent', scheduled_at timestamp, sent_at timestamp not null default now(), created_by text not null default '', created_at timestamp not null default now());
 create table if not exists campaigns (id serial primary key, title text not null default '', body text not null, channel text not null default 'telegram', attachments jsonb not null default '[]'::jsonb, segment jsonb not null default '{}'::jsonb, recipients integer not null default 0, delivered integer not null default 0, status text not null default 'sent', scheduled_at timestamp, created_at timestamp not null default now());
@@ -44,19 +66,67 @@ async function createTables() {
   await db.execute(sql.raw(DDL));
 }
 
-const OWNER_PASSWORD = "delis2026";
+const OWNER_LOGIN_PATTERN = /^[a-z0-9._-]{3,24}$/;
 
-async function ensureAdmin() {
-  const hash = hashPassword(OWNER_PASSWORD);
-  await db.execute(
-    sql`insert into users (name, login, email, role, password_hash, two_fa)
-        select 'Отабек Delis', 'owner', 'owner@delis.uz', 'owner', ${hash}, true
-        where not exists (select 1 from users where login = 'owner')`,
-  );
-  await db.execute(
-    sql`update users set password_hash = ${hash}, login = 'owner', role = 'owner', two_fa = true where login = 'owner' or email = 'owner@delis.uz'`,
-  );
+type OwnerBootstrap = { login: string; password: string; name: string; email: string };
+
+function ownerBootstrapFromEnv(): OwnerBootstrap {
+  const login = (process.env.OWNER_LOGIN ?? "").trim().toLowerCase();
+  const password = process.env.OWNER_PASSWORD ?? "";
+  const name = (process.env.OWNER_NAME ?? "Owner").trim() || "Owner";
+  const email = (process.env.OWNER_EMAIL ?? "").trim().toLowerCase();
+  const passwordError = passwordValidationError(password);
+
+  if (!OWNER_LOGIN_PATTERN.test(login) || passwordError) {
+    throw new Error(
+      "Первый Owner не настроен. Укажите OWNER_LOGIN (3–24 символа) и OWNER_PASSWORD (минимум 10 символов) в переменных окружения.",
+    );
+  }
+  return { login, password, name, email };
 }
+
+/**
+ * Creates the singleton Owner from environment variables. Legacy data without
+ * owner_initialized_at is migrated once to the environment-provided credential,
+ * so an old shipped demo password cannot remain an Owner password.
+ */
+async function ensureOwner() {
+  const [existingOwner] = await db
+    .select({ id: s.users.id, ownerInitializedAt: s.users.ownerInitializedAt })
+    .from(s.users)
+    .where(eq(s.users.role, "owner"))
+    .limit(1);
+  if (existingOwner?.ownerInitializedAt) return;
+
+  const config = ownerBootstrapFromEnv();
+  const loginInUse = await db
+    .select({ id: s.users.id })
+    .from(s.users)
+    .where(sql`lower(${s.users.login}) = ${config.login}`)
+    .limit(2);
+  if (loginInUse.some((user) => user.id !== existingOwner?.id)) {
+    throw new Error("OWNER_LOGIN уже занят существующим пользователем.");
+  }
+
+  const ownerValues = {
+    name: config.name,
+    login: config.login,
+    email: config.email,
+    role: "owner" as const,
+    passwordHash: hashPassword(config.password),
+    twoFa: false,
+    status: "active",
+    ownerInitializedAt: new Date(),
+  };
+
+  if (existingOwner) {
+    await db.update(s.users).set(ownerValues).where(eq(s.users.id, existingOwner.id));
+    return;
+  }
+  await db.insert(s.users).values(ownerValues);
+}
+
+const shouldSeedDemoData = process.env.SEED_DEMO_DATA === "true";
 
 const CATEGORIES = [
   { name: "Home Care", slug: "home-care", kind: "home", icon: "🏠" },
@@ -110,7 +180,9 @@ function rnd(n: number) {
 
 async function run() {
   await createTables();
-  await ensureAdmin();
+  await ensureOwner();
+  if (!shouldSeedDemoData) return;
+
   const existing = await db.execute<{ count: string }>(sql`select count(*)::text as count from products`);
   if (Number(existing.rows[0]?.count ?? "0") > 0) return;
 
@@ -359,15 +431,6 @@ const prodRows = PRODUCTS.map(([name, catIdx, icon, price, cost, volume], i) => 
     })),
   );
 
-  await db.insert(s.users).values([
-    { name: "Отабек Delis", email: "owner@delis.uz", role: "owner", twoFa: true },
-    { name: "Азиза Мансурова", email: "admin@delis.uz", role: "admin", twoFa: true },
-    { name: "Фаррух Юсупов", email: "manager@delis.uz", role: "manager" },
-    { name: "Улугбек Сотволдиев", email: "warehouse@delis.uz", role: "warehouse" },
-    { name: "Нигора Расулова", email: "support@delis.uz", role: "support" },
-    { name: "Шохрух Абдуллаев", email: "agent@delis.uz", role: "agent" },
-  ]);
-
   await db.insert(s.activity).values([
     { actor: "Азиза Мансурова", action: "изменила цену товара", entity: "DELIS Wax Protect Ceramic" },
     { actor: "Улугбек Сотволдиев", action: "принял поставку 400 шт", entity: "Склад №1" },
@@ -419,7 +482,7 @@ const prodRows = PRODUCTS.map(([name, catIdx, icon, price, cost, volume], i) => 
     { title: "Скрипт продаж для новых клиентов", category: "sales", icon: "💬", views: 156, createdBy: "Азиза Мансурова", content: "ПРИВЕТСТВИЕ:\n«Здравствуйте! DELIS — производитель профессиональной химии для дома и авто. Работаем с 2019 года, поставляем более 200 точкам по Узбекистану.»\n\nВЫЯВЛЕНИЕ ПОТРЕБНОСТИ:\n• Какую химию используете сейчас?\n• Что не устраивает в текущем поставщике?\n• Какой объём закупаете в месяц?\n\nПРЕЗЕНТАЦИЯ:\n• Своё производство → цена ниже импорта на 30%\n• Доставка за 24 часа по Ташкенту\n• Отсрочка платежа для постоянных клиентов\n• Бесплатные образцы на пробу\n\nЗАКРЫТИЕ:\n«Давайте начнём с пробной партии — привезу завтра, оплата после реализации.»" },
     { title: "Настройка Telegram Bot", category: "tech", icon: "🤖", views: 43, createdBy: "Отабек Delis", content: "1. Откройте @BotFather в Telegram\n2. Отправьте команду /newbot\n3. Придумайте имя бота (например: DELIS Uzbekistan)\n4. Придумайте username (должен заканчиваться на _bot)\n5. Скопируйте полученный токен\n6. В CRM: Настройки → Интеграции → Telegram Bot\n7. Вставьте токен и нажмите «Проверить соединение»\n8. После успешной проверки включите переключатель" },
     { title: "Что делать при низком остатке", category: "warehouse", icon: "⚠️", views: 71, createdBy: "Улугбек Сотволдиев", content: "СИГНАЛ: товар подсвечен красным в разделе «Склад».\n\nДЕЙСТВИЯ:\n1. Раздел «Поставщики» → красная плашка сверху\n2. Нажмите «Заказать одним кликом» — система сама рассчитает количество\n3. Или создайте закупку вручную: выберите поставщика → добавьте позиции\n4. Проверьте срок поставки (у импорта из Китая — 35 дней!)\n5. Поставьте задачу на контроль в разделе «Задачи»\n\nПРАВИЛО: заказывать при остатке ниже 3-недельного запаса." },
-    { title: "Права доступа сотрудников (RBAC)", category: "tech", icon: "🔐", views: 38, createdBy: "Отабек Delis", content: "РОЛИ В СИСТЕМЕ:\n\n• Owner — полный доступ, создание аккаунтов\n• Admin — всё кроме удаления Owner\n• Manager — заказы, клиенты, товары, чат\n• Warehouse — склад, приход/расход, инвентаризация\n• Agent — свои визиты, заказы точек\n• Support — чат и клиенты\n• Moderator — контент сайта и Mini App\n• Operator — приём заказов\n\nСОЗДАНИЕ АККАУНТА:\nПользователи → «Создать аккаунт» → имя, @логин, роль, пароль.\nЛогин выдаёт только Owner или Admin." },
+    { title: "Права доступа сотрудников (RBAC)", category: "tech", icon: "🔐", views: 38, createdBy: "Отабек Delis", content: "РОЛИ В СИСТЕМЕ:\n\n• Owner — полный доступ, создание аккаунтов\n• Admin — операционное управление без аккаунтов и паролей\n• Manager — заказы, клиенты, товары, чат\n• Warehouse — склад, приход/расход, инвентаризация\n• Agent — свои визиты, заказы точек\n• Support — чат и клиенты\n• Moderator — контент сайта и Mini App\n• Operator — приём заказов\n\nСОЗДАНИЕ АККАУНТА:\nПользователи → «Создать аккаунт» → имя, @логин, роль, пароль.\nЛогин и пароль сотруднику выдаёт или сбрасывает только Owner." },
   ]);
 
   await db.insert(s.tasks).values([
