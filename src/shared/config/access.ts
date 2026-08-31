@@ -85,6 +85,7 @@ export type Capability =
   | "agent-messages:write"
   | "upload:write"
   | "workforce:read"
+  | "fieldwork:write"
   | "security:manage";
 
 const CAPABILITY_ACCESS: Record<Capability, readonly Role[]> = {
@@ -102,6 +103,8 @@ const CAPABILITY_ACCESS: Record<Capability, readonly Role[]> = {
   // Every authenticated role may use its own tasks, KPI view, and approval requests.
   // Fine-grained authorisation (team management / own records) is enforced in server/workforce.ts.
   "workforce:read": ["admin", "manager", "warehouse", "agent", "support", "moderator", "operator"],
+  // Agents submit only their own field reports; object-level agent/route checks live in server/fieldwork.ts.
+  "fieldwork:write": ["admin", "manager", "agent"],
   "security:manage": [],
 };
 

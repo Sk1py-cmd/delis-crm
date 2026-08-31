@@ -213,17 +213,60 @@ export const approvals = pgTable("approvals", {
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 
+/** One planned field route per agent and calendar day. */
+export const agentRoutes = pgTable("agent_routes", {
+  id: serial("id").primaryKey(),
+  agentId: integer("agent_id").notNull(),
+  routeDate: text("route_date").notNull(), // YYYY-MM-DD in the operating timezone
+  title: text("title").notNull().default(""),
+  notes: text("notes").notNull().default(""),
+  status: text("status").notNull().default("planned"), // planned | in_progress | completed | cancelled
+  assignedByUserId: integer("assigned_by_user_id"),
+  assignedByName: text("assigned_by_name").notNull().default(""),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+
+/** Ordered stops of an agent route. Visit links are retained for the field history. */
+export const agentRouteStops = pgTable("agent_route_stops", {
+  id: serial("id").primaryKey(),
+  routeId: integer("route_id").notNull(),
+  sequence: integer("sequence").notNull().default(1),
+  storeName: text("store_name").notNull(),
+  storeAddress: text("store_address").notNull().default(""),
+  plannedLatitude: numeric("planned_latitude"),
+  plannedLongitude: numeric("planned_longitude"),
+  status: text("status").notNull().default("planned"), // planned | visited | skipped
+  visitId: integer("visit_id"),
+  notes: text("notes").notNull().default(""),
+  completedAt: timestamp("completed_at"),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+
+/** GPS-verifiable field visit. Legacy gpsCoords/photos remain as history-compatible snapshots. */
 export const agentVisits = pgTable("agent_visits", {
   id: serial("id").primaryKey(),
   agentId: integer("agent_id").notNull(),
+  routeId: integer("route_id"),
+  routeStopId: integer("route_stop_id"),
   storeName: text("store_name").notNull(),
   storeAddress: text("store_address").notNull().default(""),
   gpsCoords: text("gps_coords").notNull().default("41.2858, 69.2035"),
+  latitude: numeric("latitude"),
+  longitude: numeric("longitude"),
+  accuracyMeters: numeric("accuracy_meters"),
+  locationCapturedAt: timestamp("location_captured_at"),
   status: text("status").notNull().default("order_placed"), // order_placed | completed | no_order
   orderTotal: numeric("order_total").notNull().default("0"),
   notes: text("notes").notNull().default(""),
   photos: jsonb("photos").$type<string[]>().notNull().default([]),
+  source: text("source").notNull().default("online"), // online | offline
+  syncKey: text("sync_key"), // client mutation id for idempotent offline replay
+  recordedByUserId: integer("recorded_by_user_id"),
+  recordedByName: text("recorded_by_name").notNull().default(""),
   visitedAt: timestamp("visited_at").notNull().defaultNow(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 
 export const transactions = pgTable("transactions", {
