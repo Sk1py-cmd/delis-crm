@@ -83,7 +83,8 @@ export type Capability =
   | "search:read"
   | "agent-messages:read"
   | "agent-messages:write"
-  | "upload:write";
+  | "upload:write"
+  | "security:manage";
 
 const CAPABILITY_ACCESS: Record<Capability, readonly Role[]> = {
   "company:read": ["admin", "manager"],
@@ -97,6 +98,7 @@ const CAPABILITY_ACCESS: Record<Capability, readonly Role[]> = {
   "agent-messages:read": ["admin", "manager", "agent"],
   "agent-messages:write": ["admin", "manager", "agent"],
   "upload:write": ["admin", "manager", "warehouse", "agent", "support", "moderator", "operator"],
+  "security:manage": [],
 };
 
 export function hasCapability(role: string, capability: Capability): boolean {

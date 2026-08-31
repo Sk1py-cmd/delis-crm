@@ -9,6 +9,7 @@ import { verifyPassword } from "@/server/password";
 import { COOKIE } from "@/server/auth";
 import { canAttemptLogin, clearLoginAttempts, registerFailedLogin } from "@/server/loginRateLimit";
 import { rejectForeignWrite, requestIp } from "@/server/request";
+import { recordAuditEvent } from "@/server/audit";
 
 export const dynamic = "force-dynamic";
 
@@ -38,9 +39,20 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Введите логин и пароль" }, { status: 400 });
   }
 
-  const attemptKey = `${requestIp(req)}:${login}`;
+  const ip = requestIp(req);
+  const attemptKey = `${ip}:${login}`;
   const attempt = canAttemptLogin(attemptKey);
   if (!attempt.allowed) {
+    await recordAuditEvent({
+      actorName: "Неизвестный пользователь",
+      action: "вход отклонён ограничением попыток",
+      entity: `@${login}`,
+      entityType: "user",
+      eventType: "auth",
+      severity: "warning",
+      ip,
+      metadata: { reason: "rate_limited" },
+    });
     return NextResponse.json(
       { error: "Слишком много попыток входа. Попробуйте позже." },
       { status: 429, headers: { "Retry-After": String(attempt.retryAfterSeconds ?? 60) } },
@@ -56,6 +68,18 @@ export async function POST(req: NextRequest) {
 
   if (!user || !user.passwordHash || !verifyPassword(password, user.passwordHash)) {
     registerFailedLogin(attemptKey);
+    await recordAuditEvent({
+      actor: user ? { id: user.id, name: user.name, login: user.login } : null,
+      actorName: "Неизвестный пользователь",
+      action: "неудачная попытка входа",
+      entity: user ? `@${user.login}` : `@${login}`,
+      entityType: "user",
+      entityId: user?.id ?? null,
+      eventType: "auth",
+      severity: "warning",
+      ip,
+      metadata: { reason: user ? "invalid_password" : "unknown_or_blocked_login" },
+    });
     return NextResponse.json({ error: "Неверный логин или пароль" }, { status: 401 });
   }
 
@@ -68,6 +92,7 @@ export async function POST(req: NextRequest) {
     token,
     userId: user.id,
     device,
+    ip,
     expiresAt: new Date(Date.now() + 30 * 86400_000),
   });
   (await cookies()).set(COOKIE, token, {
@@ -79,9 +104,18 @@ export async function POST(req: NextRequest) {
   });
   await db
     .update(s.users)
-    .set({ lastLoginAt: new Date(), lastIp: requestIp(req), device })
+    .set({ lastLoginAt: new Date(), lastIp: ip, device })
     .where(eq(s.users.id, user.id));
-  await db.insert(s.activity).values({ actor: user.name, action: "вошёл в систему", entity: "DELIS CRM" });
+  await recordAuditEvent({
+    actor: { id: user.id, name: user.name, login: user.login },
+    action: "вошёл в систему",
+    entity: "DELIS CRM",
+    entityType: "session",
+    eventType: "auth",
+    severity: "info",
+    ip,
+    metadata: { role: user.role },
+  });
 
   return NextResponse.json({ ok: true, name: user.name, role: user.role });
 }

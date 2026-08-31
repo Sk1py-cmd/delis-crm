@@ -17,15 +17,26 @@ create table if not exists messages (id serial primary key, customer_id integer 
 create table if not exists templates (id serial primary key, title text not null, body text not null);
 create table if not exists stock_moves (id serial primary key, product_id integer not null, kind text not null, qty integer not null default 0, note text not null default '', created_at timestamp not null default now());
 create table if not exists users (id serial primary key, name text not null, email text not null default '', role text not null default 'manager', status text not null default 'active', last_ip text not null default '', device text not null default '', two_fa boolean not null default false, owner_initialized_at timestamp, agent_id integer unique, login text not null default '', password_hash text not null default '', last_login_at timestamp not null default now());
-create table if not exists activity (id serial primary key, actor text not null, action text not null, entity text not null default '', created_at timestamp not null default now());
+create table if not exists activity (id serial primary key, actor_user_id integer, actor text not null, action text not null, entity text not null default '', entity_type text not null default '', entity_id integer, event_type text not null default 'business', severity text not null default 'info', ip text not null default '', metadata jsonb not null default '{}'::jsonb, created_at timestamp not null default now());
 create table if not exists content_blocks (id serial primary key, surface text not null, "key" text not null, title text not null, body text not null default '', enabled boolean not null default true, updated_at timestamp not null default now());
-create table if not exists sessions (id serial primary key, token text not null unique, user_id integer not null, device text not null default '', expires_at timestamp not null, created_at timestamp not null default now());
+create table if not exists sessions (id serial primary key, token text not null unique, user_id integer not null, device text not null default '', ip text not null default '', expires_at timestamp not null, created_at timestamp not null default now());
 alter table users add column if not exists password_hash text not null default '';
 alter table users add column if not exists login text not null default '';
 alter table users add column if not exists agent_id integer;
 alter table users add column if not exists owner_initialized_at timestamp;
 alter table users alter column last_ip set default '';
 alter table users alter column device set default '';
+alter table activity add column if not exists actor_user_id integer;
+alter table activity add column if not exists entity_type text not null default '';
+alter table activity add column if not exists entity_id integer;
+alter table activity add column if not exists event_type text not null default 'business';
+alter table activity add column if not exists severity text not null default 'info';
+alter table activity add column if not exists ip text not null default '';
+alter table activity add column if not exists metadata jsonb not null default '{}'::jsonb;
+alter table sessions add column if not exists ip text not null default '';
+create index if not exists activity_created_at_idx on activity (created_at desc);
+create index if not exists activity_actor_user_id_idx on activity (actor_user_id);
+create index if not exists sessions_expires_at_idx on sessions (expires_at);
 -- Legacy demo data had a non-login placeholder Owner. Keep the oldest existing owner
 -- for one-time environment bootstrap and demote duplicates before enforcing singleton.
 update users set role = 'admin' where role = 'owner' and login = '';

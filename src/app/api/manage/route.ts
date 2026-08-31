@@ -5,6 +5,8 @@ import * as s from "@/db/schema";
 import { canManageUsers } from "@/server/auth";
 import { hashPassword, passwordValidationError, verifyPassword } from "@/server/password";
 import { requireManageAction } from "@/server/apiAuth";
+import { recordAuditEvent } from "@/server/audit";
+import { requestIp } from "@/server/request";
 import { isStaffRole } from "@/shared/config/access";
 import { recordSyncEvent, syncEverything, recordBroadcast, createPromocode, toggleMarketingTrigger, createSupplier, createPurchaseOrder, receivePurchaseOrder, createReturn, approveReturn, addCourier, assignDelivery, completeDelivery, addAgentVisit, createAgentStoreOrder, createTask, updateTaskStatus, deleteTask, sendAgentMessage, saveIntegration, testTelegramBot, sendTelegramMessage, saveArticle, deleteArticle, resetDemoData, publishSurface, saveSeoSettings, createInstagramPost, saveMiniAppBanners } from "@/server/queries";
 
@@ -32,6 +34,7 @@ export async function POST(req: NextRequest) {
   const authorization = await requireManageAction(req, body.action);
   if (!authorization.ok) return authorization.response;
   const { user } = authorization;
+  const ip = requestIp(req);
   const d = body.data && typeof body.data === "object" && !Array.isArray(body.data) ? body.data : {};
   const owner = canManageUsers(user.role);
   const canConfigureIntegrations = user.role === "owner" || user.role === "admin";
@@ -82,7 +85,17 @@ export async function POST(req: NextRequest) {
             status: "active",
           })
           .returning();
-        await db.insert(s.activity).values({ actor: user.name, action: "создал аккаунт сотрудника", entity: `@${login} · ${role}` });
+        await recordAuditEvent({
+          actor: user,
+          action: "создал аккаунт сотрудника",
+          entity: `@${login} · ${role}`,
+          entityType: "user",
+          entityId: created.id,
+          eventType: "security",
+          severity: "info",
+          ip,
+          metadata: { role, agentId },
+        });
         return NextResponse.json({ ok: true, id: created.id });
       }
       case "updateUserRole": {
@@ -114,7 +127,17 @@ export async function POST(req: NextRequest) {
         await db.update(s.users).set({ role, agentId }).where(eq(s.users.id, id));
         // Revoke existing sessions so a changed role takes effect immediately in every tab/device.
         await db.delete(s.sessions).where(eq(s.sessions.userId, id));
-        await db.insert(s.activity).values({ actor: user.name, action: "изменил роль сотрудника", entity: `@${target.login} → ${role}` });
+        await recordAuditEvent({
+          actor: user,
+          action: "изменил роль сотрудника",
+          entity: `@${target.login} → ${role}`,
+          entityType: "user",
+          entityId: target.id,
+          eventType: "security",
+          severity: "warning",
+          ip,
+          metadata: { previousRole: target.role, role, agentId },
+        });
         return NextResponse.json({ ok: true, reloginRequired: true });
       }
       case "setUserStatus": {
@@ -129,7 +152,17 @@ export async function POST(req: NextRequest) {
         if (target.role === "owner") return NextResponse.json({ error: "Нельзя заблокировать Owner-аккаунт" }, { status: 403 });
         await db.update(s.users).set({ status }).where(eq(s.users.id, id));
         if (status === "blocked") await db.delete(s.sessions).where(eq(s.sessions.userId, id));
-        await db.insert(s.activity).values({ actor: user.name, action: status === "blocked" ? "заблокировал аккаунт" : "разблокировал аккаунт", entity: `@${target.login}` });
+        await recordAuditEvent({
+          actor: user,
+          action: status === "blocked" ? "заблокировал аккаунт" : "разблокировал аккаунт",
+          entity: `@${target.login}`,
+          entityType: "user",
+          entityId: target.id,
+          eventType: "security",
+          severity: status === "blocked" ? "warning" : "info",
+          ip,
+          metadata: { status },
+        });
         return NextResponse.json({ ok: true });
       }
       case "resetPassword": {
@@ -143,7 +176,17 @@ export async function POST(req: NextRequest) {
         if (!target) return NextResponse.json({ error: "Пользователь не найден" }, { status: 404 });
         await db.update(s.users).set({ passwordHash: hashPassword(password) }).where(eq(s.users.id, id));
         await db.delete(s.sessions).where(eq(s.sessions.userId, id));
-        await db.insert(s.activity).values({ actor: user.name, action: "сбросил пароль сотрудника", entity: `@${target.login}` });
+        await recordAuditEvent({
+          actor: user,
+          action: "сбросил пароль сотрудника",
+          entity: `@${target.login}`,
+          entityType: "user",
+          entityId: target.id,
+          eventType: "security",
+          severity: "critical",
+          ip,
+          metadata: { accessRevoked: true },
+        });
         return NextResponse.json({ ok: true, reloginRequired: id === user.id });
       }
       case "deleteUser": {
@@ -155,7 +198,17 @@ export async function POST(req: NextRequest) {
         if (target.role === "owner" || target.id === user.id) return NextResponse.json({ error: "Нельзя удалить Owner-аккаунт" }, { status: 403 });
         await db.delete(s.sessions).where(eq(s.sessions.userId, id));
         await db.delete(s.users).where(eq(s.users.id, id));
-        await db.insert(s.activity).values({ actor: user.name, action: "удалил аккаунт", entity: `@${target.login}` });
+        await recordAuditEvent({
+          actor: user,
+          action: "удалил аккаунт",
+          entity: `@${target.login}`,
+          entityType: "user",
+          entityId: target.id,
+          eventType: "security",
+          severity: "critical",
+          ip,
+          metadata: { role: target.role, accessRevoked: true },
+        });
         return NextResponse.json({ ok: true });
       }
       case "createAgent": {
@@ -496,7 +549,17 @@ export async function POST(req: NextRequest) {
         if (passwordError) return NextResponse.json({ error: passwordError }, { status: 400 });
         await db.update(s.users).set({ passwordHash: hashPassword(str(d.newPassword)) }).where(eq(s.users.id, userRow.id));
         await db.delete(s.sessions).where(eq(s.sessions.userId, user.id));
-        await db.insert(s.activity).values({ actor: user.name, action: "сменил пароль", entity: "свой аккаунт" });
+        await recordAuditEvent({
+          actor: user,
+          action: "сменил пароль Owner",
+          entity: "свой аккаунт",
+          entityType: "user",
+          entityId: user.id,
+          eventType: "security",
+          severity: "critical",
+          ip,
+          metadata: { accessRevoked: true },
+        });
         return NextResponse.json({ ok: true, reloginRequired: true });
       }
       case "changeLogin": {
@@ -513,7 +576,17 @@ export async function POST(req: NextRequest) {
         const exists = await db.select({ id: s.users.id }).from(s.users).where(sql`lower(${s.users.login}) = ${newLogin}`).limit(1);
         if (exists.some((existing) => existing.id !== user.id)) return NextResponse.json({ error: "Логин уже занят" }, { status: 409 });
         await db.update(s.users).set({ login: newLogin }).where(eq(s.users.id, userRow.id));
-        await db.insert(s.activity).values({ actor: user.name, action: "сменил логин", entity: `@${newLogin}` });
+        await recordAuditEvent({
+          actor: user,
+          action: "сменил логин Owner",
+          entity: `@${newLogin}`,
+          entityType: "user",
+          entityId: user.id,
+          eventType: "security",
+          severity: "warning",
+          ip,
+          metadata: { previousLogin: userRow.login, login: newLogin },
+        });
         return NextResponse.json({ ok: true, login: newLogin });
       }
       case "createInstagramPost": {

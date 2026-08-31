@@ -68,6 +68,7 @@ export const NAV: NavItem[] = [
   { href: "/instagram", labelKey: "instagram", icon: Camera, group: "channels" },
   { href: "/finance", labelKey: "finance", icon: Wallet, group: "management" },
   { href: "/users", labelKey: "users", icon: ShieldCheck, group: "management" },
+  { href: "/security", labelKey: "security", icon: ShieldCheck, group: "management" },
   { href: "/integrations", labelKey: "integrations", icon: Plug, group: "management" },
   { href: "/agent-portal", labelKey: "agentPortal", icon: Smartphone, group: "management" },
   { href: "/settings", labelKey: "settings", icon: Settings, group: "management" },

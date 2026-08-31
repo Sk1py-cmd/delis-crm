@@ -225,9 +225,18 @@ export const users = pgTable("users", {
 
 export const activity = pgTable("activity", {
   id: serial("id").primaryKey(),
+  /** Nullable for system-generated security events such as a throttled login. */
+  actorUserId: integer("actor_user_id"),
   actor: text("actor").notNull(),
   action: text("action").notNull(),
   entity: text("entity").notNull().default(""),
+  entityType: text("entity_type").notNull().default(""),
+  entityId: integer("entity_id"),
+  eventType: text("event_type").notNull().default("business"),
+  severity: text("severity").notNull().default("info"),
+  ip: text("ip").notNull().default(""),
+  /** Never store passwords, session tokens, or integration secrets in this payload. */
+  metadata: jsonb("metadata").$type<Record<string, string | number | boolean | null>>().notNull().default({}),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 
@@ -236,6 +245,7 @@ export const sessions = pgTable("sessions", {
   token: text("token").notNull().unique(),
   userId: integer("user_id").notNull(),
   device: text("device").notNull().default(""),
+  ip: text("ip").notNull().default(""),
   expiresAt: timestamp("expires_at").notNull(),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
