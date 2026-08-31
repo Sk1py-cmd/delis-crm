@@ -326,38 +326,6 @@ export async function getAgents() {
   return db.select().from(s.agents).orderBy(desc(s.agents.fact));
 }
 
-export async function getTasks() {
-  await init();
-  return db.select().from(s.tasks).orderBy(desc(s.tasks.createdAt)).limit(100);
-}
-
-export async function createTask(input: {
-  title: string; description: string; assignee: string; priority: string;
-  linkType: string; linkLabel: string; dueAt: Date | null; actor: string;
-}) {
-  const [t] = await db.insert(s.tasks).values({
-    title: input.title, description: input.description, assignee: input.assignee,
-    priority: input.priority, linkType: input.linkType, linkLabel: input.linkLabel,
-    dueAt: input.dueAt, createdBy: input.actor,
-  }).returning();
-  await db.insert(s.activity).values({ actor: input.actor, action: "создал задачу", entity: input.title });
-  await recordSyncEvent({ source: "crm", target: "all", entity: "task", action: "task_created", payload: { title: input.title, assignee: input.assignee } });
-  return t;
-}
-
-export async function updateTaskStatus(id: number, status: string, actor: string) {
-  const [t] = await db.update(s.tasks).set({ status }).where(eq(s.tasks.id, id)).returning();
-  if (t && status === "done") {
-    await db.insert(s.activity).values({ actor, action: "выполнил задачу", entity: t.title });
-  }
-  return t;
-}
-
-export async function deleteTask(id: number) {
-  await db.delete(s.tasks).where(eq(s.tasks.id, id));
-  return { ok: true };
-}
-
 export async function getAgentVisits(agentId?: number) {
   await init();
   return db

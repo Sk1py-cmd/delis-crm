@@ -147,13 +147,69 @@ export const tasks = pgTable("tasks", {
   id: serial("id").primaryKey(),
   title: text("title").notNull(),
   description: text("description").notNull().default(""),
+  /** Human-readable snapshots remain useful if an employee account is later removed. */
   assignee: text("assignee").notNull().default(""),
+  assigneeUserId: integer("assignee_user_id"),
   priority: text("priority").notNull().default("mid"), // high | mid | low
   status: text("status").notNull().default("todo"), // todo | in_progress | done
-  linkType: text("link_type").notNull().default(""), // order | customer | agent | supplier
+  linkType: text("link_type").notNull().default(""), // order | customer | agent | supplier | approval
   linkLabel: text("link_label").notNull().default(""),
   dueAt: timestamp("due_at"),
+  completedAt: timestamp("completed_at"),
   createdBy: text("created_by").notNull().default(""),
+  createdByUserId: integer("created_by_user_id"),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+
+/** Owner-maintained operational profile for a staff member; credentials stay on users. */
+export const employeeProfiles = pgTable("employee_profiles", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id").notNull().unique(),
+  position: text("position").notNull().default(""),
+  department: text("department").notNull().default(""),
+  phone: text("phone").notNull().default(""),
+  hireDate: timestamp("hire_date"),
+  notes: text("notes").notNull().default(""),
+  avatarColor: text("avatar_color").notNull().default("#64748b"),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+
+/** A target/fact KPI row is unique for each employee, metric, and calendar month. */
+export const employeeKpis = pgTable("employee_kpis", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id").notNull(),
+  period: text("period").notNull(), // YYYY-MM
+  metric: text("metric").notNull(), // sales | tasks | visits | quality
+  label: text("label").notNull().default(""),
+  target: numeric("target").notNull().default("0"),
+  actual: numeric("actual").notNull().default("0"),
+  unit: text("unit").notNull().default(""),
+  note: text("note").notNull().default(""),
+  updatedByUserId: integer("updated_by_user_id"),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+
+/** A lightweight, auditable operational approval request. */
+export const approvals = pgTable("approvals", {
+  id: serial("id").primaryKey(),
+  title: text("title").notNull(),
+  description: text("description").notNull().default(""),
+  type: text("type").notNull().default("other"),
+  priority: text("priority").notNull().default("normal"),
+  status: text("status").notNull().default("pending"), // pending | approved | rejected | cancelled
+  requesterUserId: integer("requester_user_id"),
+  requesterName: text("requester_name").notNull().default(""),
+  reviewerUserId: integer("reviewer_user_id"),
+  reviewerName: text("reviewer_name").notNull().default(""),
+  relatedTaskId: integer("related_task_id"),
+  amount: numeric("amount").notNull().default("0"),
+  decisionNote: text("decision_note").notNull().default(""),
+  dueAt: timestamp("due_at"),
+  reviewedAt: timestamp("reviewed_at"),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 

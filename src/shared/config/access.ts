@@ -29,18 +29,18 @@ export const ROLE_ACCESS: Record<Role, readonly string[]> = {
     "/", "/company-os", "/analytics", "/pnl", "/knowledge", "/tasks", "/orders", "/products",
     "/warehouse", "/suppliers", "/customers", "/agents", "/marketing", "/delivery", "/returns",
     "/chat", "/broadcast", "/notifications", "/miniapp", "/website", "/instagram", "/finance",
-    "/integrations", "/settings",
+    "/integrations", "/kpi", "/approvals", "/settings",
   ],
   manager: [
     "/", "/company-os", "/analytics", "/knowledge", "/tasks", "/orders", "/products", "/warehouse",
     "/suppliers", "/delivery", "/returns", "/customers", "/agents", "/marketing", "/chat", "/broadcast",
-    "/notifications", "/miniapp", "/website", "/instagram", "/settings",
+    "/notifications", "/miniapp", "/website", "/instagram", "/kpi", "/approvals", "/settings",
   ],
-  warehouse: ["/", "/tasks", "/knowledge", "/products", "/warehouse", "/suppliers", "/returns", "/delivery", "/settings"],
-  agent: ["/", "/agent-portal", "/tasks", "/knowledge", "/settings"],
-  support: ["/", "/tasks", "/knowledge", "/chat", "/customers", "/orders", "/returns", "/notifications", "/settings"],
-  moderator: ["/", "/tasks", "/knowledge", "/products", "/miniapp", "/website", "/instagram", "/marketing", "/broadcast", "/settings"],
-  operator: ["/", "/tasks", "/knowledge", "/orders", "/customers", "/chat", "/delivery", "/settings"],
+  warehouse: ["/", "/tasks", "/knowledge", "/products", "/warehouse", "/suppliers", "/returns", "/delivery", "/kpi", "/approvals", "/settings"],
+  agent: ["/", "/agent-portal", "/tasks", "/knowledge", "/kpi", "/approvals", "/settings"],
+  support: ["/", "/tasks", "/knowledge", "/chat", "/customers", "/orders", "/returns", "/notifications", "/kpi", "/approvals", "/settings"],
+  moderator: ["/", "/tasks", "/knowledge", "/products", "/miniapp", "/website", "/instagram", "/marketing", "/broadcast", "/kpi", "/approvals", "/settings"],
+  operator: ["/", "/tasks", "/knowledge", "/orders", "/customers", "/chat", "/delivery", "/kpi", "/approvals", "/settings"],
 };
 
 const DEFAULT_ROUTE: Record<Role, string> = {
@@ -84,6 +84,7 @@ export type Capability =
   | "agent-messages:read"
   | "agent-messages:write"
   | "upload:write"
+  | "workforce:read"
   | "security:manage";
 
 const CAPABILITY_ACCESS: Record<Capability, readonly Role[]> = {
@@ -98,6 +99,9 @@ const CAPABILITY_ACCESS: Record<Capability, readonly Role[]> = {
   "agent-messages:read": ["admin", "manager", "agent"],
   "agent-messages:write": ["admin", "manager", "agent"],
   "upload:write": ["admin", "manager", "warehouse", "agent", "support", "moderator", "operator"],
+  // Every authenticated role may use its own tasks, KPI view, and approval requests.
+  // Fine-grained authorisation (team management / own records) is enforced in server/workforce.ts.
+  "workforce:read": ["admin", "manager", "warehouse", "agent", "support", "moderator", "operator"],
   "security:manage": [],
 };
 
@@ -134,9 +138,6 @@ export const MANAGE_ACTIONS = [
   "assignDelivery",
   "completeDelivery",
   "addAgentVisit",
-  "createTask",
-  "updateTaskStatus",
-  "deleteTask",
   "sendAgentMessage",
   "saveIntegration",
   "testTelegram",
@@ -186,9 +187,6 @@ const MANAGE_ACTION_ACCESS: Record<ManageAction, readonly StaffRole[]> = {
   assignDelivery: ["admin", "manager", "warehouse", "operator"],
   completeDelivery: ["admin", "manager", "warehouse", "operator"],
   addAgentVisit: ["admin", "manager", "agent"],
-  createTask: ["admin", "manager", "warehouse", "agent", "support", "moderator", "operator"],
-  updateTaskStatus: ["admin", "manager", "warehouse", "agent", "support", "moderator", "operator"],
-  deleteTask: ["admin", "manager"],
   sendAgentMessage: ["admin", "manager", "agent"],
   saveIntegration: ["admin"],
   testTelegram: ["admin"],

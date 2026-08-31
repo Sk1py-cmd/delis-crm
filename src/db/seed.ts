@@ -92,7 +92,33 @@ create table if not exists returns (id serial primary key, order_id integer not 
 create table if not exists couriers (id serial primary key, name text not null, phone text not null default '', vehicle text not null default 'car', zone text not null default 'Tashkent', status text not null default 'available', active_deliveries integer not null default 0, completed_today integer not null default 0, rating integer not null default 5, avatar_color text not null default '#3b82f6', created_at timestamp not null default now());
 create table if not exists deliveries (id serial primary key, order_id integer not null, courier_id integer, status text not null default 'pending', address text not null default '', city text not null default 'Tashkent', scheduled_at timestamp, delivered_at timestamp, notes text not null default '', created_at timestamp not null default now());
 create table if not exists agent_visits (id serial primary key, agent_id integer not null, store_name text not null, store_address text not null default '', gps_coords text not null default '41.2858, 69.2035', status text not null default 'order_placed', order_total numeric not null default 0, notes text not null default '', photos jsonb not null default '[]'::jsonb, visited_at timestamp not null default now());
-create table if not exists tasks (id serial primary key, title text not null, description text not null default '', assignee text not null default '', priority text not null default 'mid', status text not null default 'todo', link_type text not null default '', link_label text not null default '', due_at timestamp, created_by text not null default '', created_at timestamp not null default now());
+create table if not exists tasks (id serial primary key, title text not null, description text not null default '', assignee text not null default '', assignee_user_id integer, priority text not null default 'mid', status text not null default 'todo', link_type text not null default '', link_label text not null default '', due_at timestamp, completed_at timestamp, created_by text not null default '', created_by_user_id integer, updated_at timestamp not null default now(), created_at timestamp not null default now());
+create table if not exists employee_profiles (id serial primary key, user_id integer not null, position text not null default '', department text not null default '', phone text not null default '', hire_date timestamp, notes text not null default '', avatar_color text not null default '#64748b', updated_at timestamp not null default now(), created_at timestamp not null default now());
+create table if not exists employee_kpis (id serial primary key, user_id integer not null, period text not null, metric text not null, label text not null default '', target numeric not null default 0, actual numeric not null default 0, unit text not null default '', note text not null default '', updated_by_user_id integer, updated_at timestamp not null default now(), created_at timestamp not null default now());
+create table if not exists approvals (id serial primary key, title text not null, description text not null default '', type text not null default 'other', priority text not null default 'normal', status text not null default 'pending', requester_user_id integer, requester_name text not null default '', reviewer_user_id integer, reviewer_name text not null default '', related_task_id integer, amount numeric not null default 0, decision_note text not null default '', due_at timestamp, reviewed_at timestamp, updated_at timestamp not null default now(), created_at timestamp not null default now());
+alter table tasks add column if not exists assignee_user_id integer;
+alter table tasks add column if not exists completed_at timestamp;
+alter table tasks add column if not exists created_by_user_id integer;
+alter table tasks add column if not exists updated_at timestamp not null default now();
+alter table approvals add column if not exists priority text not null default 'normal';
+-- Convert legacy name-only task links where the matching account is unambiguous.
+update tasks set assignee_user_id = users.id
+from users
+where tasks.assignee_user_id is null and lower(trim(tasks.assignee)) = lower(trim(users.name));
+update tasks set created_by_user_id = users.id
+from users
+where tasks.created_by_user_id is null and lower(trim(tasks.created_by)) = lower(trim(users.name));
+update tasks set completed_at = coalesce(completed_at, updated_at, created_at)
+where status = 'done' and completed_at is null;
+create unique index if not exists employee_profiles_user_id_unique on employee_profiles (user_id);
+create unique index if not exists employee_kpis_user_period_metric_unique on employee_kpis (user_id, period, metric);
+create index if not exists employee_kpis_period_idx on employee_kpis (period);
+create index if not exists approvals_status_created_at_idx on approvals (status, created_at desc);
+create index if not exists approvals_requester_user_id_idx on approvals (requester_user_id);
+create index if not exists approvals_related_task_id_idx on approvals (related_task_id);
+create index if not exists tasks_assignee_user_id_idx on tasks (assignee_user_id);
+create index if not exists tasks_created_by_user_id_idx on tasks (created_by_user_id);
+create index if not exists tasks_status_updated_at_idx on tasks (status, updated_at desc);
 create table if not exists agent_messages (id serial primary key, agent_id integer not null, body text not null, from_admin boolean not null default false, read_at timestamp, created_at timestamp not null default now());
 create table if not exists integrations (id serial primary key, key text not null unique, title text not null, enabled boolean not null default false, credentials jsonb not null default '{}'::jsonb, status text not null default 'not_configured', last_check_at timestamp, updated_at timestamp not null default now());
 create table if not exists knowledge_base (id serial primary key, title text not null, category text not null default 'general', content text not null default '', icon text not null default '📄', views integer not null default 0, is_pinned boolean not null default false, created_by text not null default '', updated_at timestamp not null default now(), created_at timestamp not null default now());

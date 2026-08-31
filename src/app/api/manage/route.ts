@@ -8,7 +8,8 @@ import { requireManageAction } from "@/server/apiAuth";
 import { recordAuditEvent } from "@/server/audit";
 import { requestIp } from "@/server/request";
 import { isStaffRole } from "@/shared/config/access";
-import { recordSyncEvent, syncEverything, recordBroadcast, createPromocode, toggleMarketingTrigger, createSupplier, createPurchaseOrder, receivePurchaseOrder, createReturn, approveReturn, addCourier, assignDelivery, completeDelivery, addAgentVisit, createAgentStoreOrder, createTask, updateTaskStatus, deleteTask, sendAgentMessage, saveIntegration, testTelegramBot, sendTelegramMessage, saveArticle, deleteArticle, resetDemoData, publishSurface, saveSeoSettings, createInstagramPost, saveMiniAppBanners } from "@/server/queries";
+import { removeWorkforceArtifactsForDeletedUser } from "@/server/workforce";
+import { recordSyncEvent, syncEverything, recordBroadcast, createPromocode, toggleMarketingTrigger, createSupplier, createPurchaseOrder, receivePurchaseOrder, createReturn, approveReturn, addCourier, assignDelivery, completeDelivery, addAgentVisit, createAgentStoreOrder, sendAgentMessage, saveIntegration, testTelegramBot, sendTelegramMessage, saveArticle, deleteArticle, resetDemoData, publishSurface, saveSeoSettings, createInstagramPost, saveMiniAppBanners } from "@/server/queries";
 
 export const dynamic = "force-dynamic";
 
@@ -212,6 +213,7 @@ export async function POST(req: NextRequest) {
         if (target.role === "owner" || target.id === user.id) return NextResponse.json({ error: "Нельзя удалить Owner-аккаунт" }, { status: 403 });
         await db.delete(s.sessions).where(eq(s.sessions.userId, id));
         await invalidateTwoFactorArtifacts(id, true);
+        await removeWorkforceArtifactsForDeletedUser(id);
         await db.delete(s.users).where(eq(s.users.id, id));
         await recordAuditEvent({
           actor: user,
@@ -454,29 +456,6 @@ export async function POST(req: NextRequest) {
           actor: user.name,
         });
         return NextResponse.json({ ok: true, id: visit.id });
-      }
-      case "createTask": {
-        const title = str(d.title).trim();
-        if (!title) return NextResponse.json({ error: "Укажите название задачи" }, { status: 400 });
-        const t = await createTask({
-          title,
-          description: str(d.description),
-          assignee: str(d.assignee),
-          priority: str(d.priority, "mid"),
-          linkType: str(d.linkType),
-          linkLabel: str(d.linkLabel),
-          dueAt: d.dueAt ? new Date(str(d.dueAt)) : null,
-          actor: user.name,
-        });
-        return NextResponse.json({ ok: true, id: t.id });
-      }
-      case "updateTaskStatus": {
-        await updateTaskStatus(num(d.id), str(d.status, "todo"), user.name);
-        return NextResponse.json({ ok: true });
-      }
-      case "deleteTask": {
-        await deleteTask(num(d.id));
-        return NextResponse.json({ ok: true });
       }
       case "sendAgentMessage": {
         const agentId = num(d.agentId);

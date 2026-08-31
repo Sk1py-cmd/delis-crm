@@ -1,17 +1,17 @@
-import { getUsers, getActivity, getAgents } from "@/server/queries";
-import { getSessionUser } from "@/server/auth";
+import { getActivity, getAgents } from "@/server/queries";
 import { requireAccess } from "@/server/guard";
+import { getEmployeeDirectory } from "@/server/workforce";
 import { UsersClient } from "./UsersClient";
 
 export const dynamic = "force-dynamic";
 
 export default async function UsersPage() {
-  await requireAccess("/users");
-  const [users, activity, session, agents] = await Promise.all([getUsers(), getActivity(), getSessionUser(), getAgents()]);
+  const viewer = await requireAccess("/users");
+  const [users, activity, agents] = await Promise.all([getEmployeeDirectory(viewer), getActivity(), getAgents()]);
 
   return (
     <UsersClient
-      currentRole={session?.role ?? "manager"}
+      currentRole={viewer.role}
       users={users.map((user) => ({
         id: user.id,
         name: user.name,
@@ -23,6 +23,20 @@ export default async function UsersPage() {
         lastIp: user.lastIp,
         device: user.device,
         lastLoginAt: String(user.lastLoginAt),
+        profile: user.profile
+          ? {
+            position: user.profile.position,
+            department: user.profile.department,
+            phone: user.profile.phone,
+            hireDate: user.profile.hireDate ? user.profile.hireDate.toISOString().slice(0, 10) : null,
+            notes: user.profile.notes,
+            avatarColor: user.profile.avatarColor,
+          }
+          : null,
+        taskStats: user.taskStats,
+        pendingApprovals: user.pendingApprovals,
+        kpiCompletion: user.kpiCompletion,
+        kpiCount: user.kpiCount,
       }))}
       agents={agents.map((agent) => ({
         id: agent.id,
