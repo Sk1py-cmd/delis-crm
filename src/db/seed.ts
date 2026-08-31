@@ -16,14 +16,20 @@ create table if not exists transactions (id serial primary key, kind text not nu
 create table if not exists messages (id serial primary key, customer_id integer not null, body text not null, from_admin boolean not null default false, kind text not null default 'text', read_at timestamp, created_at timestamp not null default now());
 create table if not exists templates (id serial primary key, title text not null, body text not null);
 create table if not exists stock_moves (id serial primary key, product_id integer not null, kind text not null, qty integer not null default 0, note text not null default '', created_at timestamp not null default now());
-create table if not exists users (id serial primary key, name text not null, email text not null default '', role text not null default 'manager', status text not null default 'active', last_ip text not null default '', device text not null default '', two_fa boolean not null default false, owner_initialized_at timestamp, agent_id integer unique, login text not null default '', password_hash text not null default '', last_login_at timestamp not null default now());
+create table if not exists users (id serial primary key, name text not null, email text not null default '', role text not null default 'manager', status text not null default 'active', last_ip text not null default '', device text not null default '', two_fa boolean not null default false, two_fa_secret_encrypted text not null default '', two_fa_enabled_at timestamp, owner_initialized_at timestamp, agent_id integer unique, login text not null default '', password_hash text not null default '', last_login_at timestamp not null default now());
 create table if not exists activity (id serial primary key, actor_user_id integer, actor text not null, action text not null, entity text not null default '', entity_type text not null default '', entity_id integer, event_type text not null default 'business', severity text not null default 'info', ip text not null default '', metadata jsonb not null default '{}'::jsonb, created_at timestamp not null default now());
 create table if not exists content_blocks (id serial primary key, surface text not null, "key" text not null, title text not null, body text not null default '', enabled boolean not null default true, updated_at timestamp not null default now());
 create table if not exists sessions (id serial primary key, token text not null unique, user_id integer not null, device text not null default '', ip text not null default '', expires_at timestamp not null, created_at timestamp not null default now());
+create table if not exists two_factor_challenges (id serial primary key, token_hash text not null unique, user_id integer not null, attempts integer not null default 0, expires_at timestamp not null, created_at timestamp not null default now());
+create table if not exists two_factor_enrollments (id serial primary key, token_hash text not null unique, user_id integer not null, secret_encrypted text not null, attempts integer not null default 0, expires_at timestamp not null, created_at timestamp not null default now());
+create table if not exists two_factor_backup_codes (id serial primary key, user_id integer not null, code_hash text not null, used_at timestamp, created_at timestamp not null default now());
 alter table users add column if not exists password_hash text not null default '';
 alter table users add column if not exists login text not null default '';
 alter table users add column if not exists agent_id integer;
 alter table users add column if not exists owner_initialized_at timestamp;
+alter table users add column if not exists two_fa_secret_encrypted text not null default '';
+alter table users add column if not exists two_fa_enabled_at timestamp;
+alter table two_factor_enrollments add column if not exists attempts integer not null default 0;
 alter table users alter column last_ip set default '';
 alter table users alter column device set default '';
 alter table activity add column if not exists actor_user_id integer;
@@ -37,6 +43,25 @@ alter table sessions add column if not exists ip text not null default '';
 create index if not exists activity_created_at_idx on activity (created_at desc);
 create index if not exists activity_actor_user_id_idx on activity (actor_user_id);
 create index if not exists sessions_expires_at_idx on sessions (expires_at);
+-- Keep the newest record before adding the singleton-flow guarantees to a pre-release database.
+with ranked_two_factor_challenges as (
+  select id, row_number() over (partition by user_id order by created_at desc, id desc) as position
+  from two_factor_challenges
+)
+delete from two_factor_challenges where id in (select id from ranked_two_factor_challenges where position > 1);
+with ranked_two_factor_enrollments as (
+  select id, row_number() over (partition by user_id order by created_at desc, id desc) as position
+  from two_factor_enrollments
+)
+delete from two_factor_enrollments where id in (select id from ranked_two_factor_enrollments where position > 1);
+create unique index if not exists two_factor_challenges_user_id_unique on two_factor_challenges (user_id);
+create index if not exists two_factor_challenges_expires_at_idx on two_factor_challenges (expires_at);
+create unique index if not exists two_factor_enrollments_user_id_unique on two_factor_enrollments (user_id);
+create index if not exists two_factor_enrollments_expires_at_idx on two_factor_enrollments (expires_at);
+create index if not exists two_factor_backup_codes_user_id_idx on two_factor_backup_codes (user_id);
+-- Old UI flags did not contain a real TOTP secret or enablement timestamp. Do not let a legacy flag lock anyone out.
+update users set two_fa = false, two_fa_secret_encrypted = '', two_fa_enabled_at = null
+where two_fa = true and two_fa_enabled_at is null and coalesce(two_fa_secret_encrypted, '') = '';
 -- Legacy demo data had a non-login placeholder Owner. Keep the oldest existing owner
 -- for one-time environment bootstrap and demote duplicates before enforcing singleton.
 update users set role = 'admin' where role = 'owner' and login = '';

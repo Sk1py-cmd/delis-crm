@@ -682,9 +682,23 @@ export async function recordBroadcast(data: {
   return b;
 }
 
+/** Deliberately excludes credential hashes and all 2FA fields from user-list callers. */
 export async function getUsers() {
   await init();
-  return db.select().from(s.users);
+  return db
+    .select({
+      id: s.users.id,
+      name: s.users.name,
+      login: s.users.login,
+      email: s.users.email,
+      role: s.users.role,
+      status: s.users.status,
+      lastIp: s.users.lastIp,
+      device: s.users.device,
+      agentId: s.users.agentId,
+      lastLoginAt: s.users.lastLoginAt,
+    })
+    .from(s.users);
 }
 
 export async function getActivity() {

@@ -1,15 +1,21 @@
 import { NextRequest, NextResponse } from "next/server";
-import { cookies } from "next/headers";
-import crypto from "crypto";
 import { and, eq, sql } from "drizzle-orm";
 import { db } from "@/db";
 import * as s from "@/db/schema";
 import { ensureSeed } from "@/db/seed";
 import { verifyPassword } from "@/server/password";
-import { COOKIE } from "@/server/auth";
+import { COOKIE, createSessionForUser, sessionCookieOptions } from "@/server/auth";
 import { canAttemptLogin, clearLoginAttempts, registerFailedLogin } from "@/server/loginRateLimit";
 import { rejectForeignWrite, requestIp } from "@/server/request";
 import { recordAuditEvent } from "@/server/audit";
+import {
+  clearTwoFactorCookie,
+  issueTwoFactorChallenge,
+  TWO_FACTOR_CHALLENGE_COOKIE,
+  TWO_FACTOR_ENROLLMENT_COOKIE,
+  TWO_FACTOR_CHALLENGE_TTL_SECONDS,
+  twoFactorCookieOptions,
+} from "@/server/twoFactor";
 
 export const dynamic = "force-dynamic";
 
@@ -84,28 +90,48 @@ export async function POST(req: NextRequest) {
   }
 
   clearLoginAttempts(attemptKey);
-  await db.delete(s.sessions).where(sql`${s.sessions.expiresAt} <= now()`);
 
-  const token = crypto.randomUUID();
-  const device = (req.headers.get("user-agent") ?? "").slice(0, 160);
-  await db.insert(s.sessions).values({
-    token,
-    userId: user.id,
-    device,
-    ip,
-    expiresAt: new Date(Date.now() + 30 * 86400_000),
-  });
-  (await cookies()).set(COOKIE, token, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    path: "/",
-    sameSite: "lax",
-    maxAge: 30 * 86400,
-  });
-  await db
-    .update(s.users)
-    .set({ lastLoginAt: new Date(), lastIp: ip, device })
-    .where(eq(s.users.id, user.id));
+  if (user.role === "owner" && user.twoFa) {
+    if (!user.twoFaSecretEncrypted) {
+      await recordAuditEvent({
+        actor: { id: user.id, name: user.name, login: user.login },
+        action: "вход Owner отклонён: 2FA настроена некорректно",
+        entity: `@${user.login}`,
+        entityType: "user",
+        entityId: user.id,
+        eventType: "security",
+        severity: "critical",
+        ip,
+        metadata: { reason: "missing_totp_secret" },
+      });
+      return NextResponse.json(
+        { error: "Двухфакторная защита настроена некорректно. Обратитесь к администратору инфраструктуры." },
+        { status: 503 },
+      );
+    }
+
+    const challengeToken = await issueTwoFactorChallenge(user.id);
+    await recordAuditEvent({
+      actor: { id: user.id, name: user.name, login: user.login },
+      action: "подтвердил пароль, ожидается код 2FA",
+      entity: "DELIS CRM",
+      entityType: "session",
+      eventType: "auth",
+      severity: "info",
+      ip,
+      metadata: { factor: "totp" },
+    });
+
+    const response = NextResponse.json({ requiresTwoFactor: true });
+    response.cookies.set(
+      TWO_FACTOR_CHALLENGE_COOKIE,
+      challengeToken,
+      twoFactorCookieOptions(TWO_FACTOR_CHALLENGE_TTL_SECONDS),
+    );
+    return response;
+  }
+
+  const session = await createSessionForUser(user.id, req);
   await recordAuditEvent({
     actor: { id: user.id, name: user.name, login: user.login },
     action: "вошёл в систему",
@@ -117,5 +143,9 @@ export async function POST(req: NextRequest) {
     metadata: { role: user.role },
   });
 
-  return NextResponse.json({ ok: true, name: user.name, role: user.role });
+  const response = NextResponse.json({ ok: true, name: user.name, role: user.role });
+  response.cookies.set(COOKIE, session.token, sessionCookieOptions());
+  clearTwoFactorCookie(response, TWO_FACTOR_CHALLENGE_COOKIE);
+  clearTwoFactorCookie(response, TWO_FACTOR_ENROLLMENT_COOKIE);
+  return response;
 }

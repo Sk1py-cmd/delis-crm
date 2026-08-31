@@ -8,12 +8,13 @@ export const dynamic = "force-dynamic";
 
 /** Owner-only page; API mutations repeat the authorization check server-side. */
 export default async function SecurityPage() {
-  await requireAccess("/security");
+  const owner = await requireAccess("/security");
   const currentToken = (await cookies()).get(COOKIE)?.value;
   const [sessions, audit] = await Promise.all([getActiveSessions(currentToken), getAuditEvents(100)]);
 
   return (
     <SecurityClient
+      twoFactorEnabled={owner.twoFa}
       sessions={sessions.map((session) => ({
         ...session,
         createdAt: String(session.createdAt),

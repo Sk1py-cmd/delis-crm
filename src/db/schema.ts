@@ -214,7 +214,11 @@ export const users = pgTable("users", {
   status: text("status").notNull().default("active"),
   lastIp: text("last_ip").notNull().default(""),
   device: text("device").notNull().default(""),
+  /** TOTP is available only to the singleton Owner. */
   twoFa: boolean("two_fa").notNull().default(false),
+  /** AES-256-GCM encrypted TOTP secret; plaintext never reaches the database. */
+  twoFaSecretEncrypted: text("two_fa_secret_encrypted").notNull().default(""),
+  twoFaEnabledAt: timestamp("two_fa_enabled_at"),
   /** Marks that the singleton Owner was initialized from OWNER_LOGIN/OWNER_PASSWORD. */
   ownerInitializedAt: timestamp("owner_initialized_at"),
   /** Linked employee profile for the Agent portal; one CRM user can own one agent profile. */
@@ -247,6 +251,38 @@ export const sessions = pgTable("sessions", {
   device: text("device").notNull().default(""),
   ip: text("ip").notNull().default(""),
   expiresAt: timestamp("expires_at").notNull(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+
+/** Short-lived proof that password verification passed and a TOTP code is now required. */
+export const twoFactorChallenges = pgTable("two_factor_challenges", {
+  id: serial("id").primaryKey(),
+  tokenHash: text("token_hash").notNull().unique(),
+  /** Enforces exactly one active password-to-factor challenge per user. */
+  userId: integer("user_id").notNull().unique(),
+  attempts: integer("attempts").notNull().default(0),
+  expiresAt: timestamp("expires_at").notNull(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+
+/** Pending, password-reauthenticated enrollment. The TOTP secret is encrypted at rest. */
+export const twoFactorEnrollments = pgTable("two_factor_enrollments", {
+  id: serial("id").primaryKey(),
+  tokenHash: text("token_hash").notNull().unique(),
+  /** Replacing enrollment is atomic, so one Owner cannot hold parallel QR secrets. */
+  userId: integer("user_id").notNull().unique(),
+  secretEncrypted: text("secret_encrypted").notNull(),
+  attempts: integer("attempts").notNull().default(0),
+  expiresAt: timestamp("expires_at").notNull(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+
+/** One-time Owner recovery codes are kept only as keyed hashes. */
+export const twoFactorBackupCodes = pgTable("two_factor_backup_codes", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id").notNull(),
+  codeHash: text("code_hash").notNull(),
+  usedAt: timestamp("used_at"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 

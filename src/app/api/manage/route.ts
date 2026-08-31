@@ -20,6 +20,15 @@ interface ManageBody {
 const str = (v: unknown, d = "") => (typeof v === "string" ? v : d);
 const num = (v: unknown, d = 0) => (typeof v === "number" && Number.isFinite(v) ? v : d);
 
+/** Password, status, and role changes invalidate any half-complete 2FA flow. */
+async function invalidateTwoFactorArtifacts(userId: number, removeBackupCodes = false) {
+  await db.delete(s.twoFactorChallenges).where(eq(s.twoFactorChallenges.userId, userId));
+  await db.delete(s.twoFactorEnrollments).where(eq(s.twoFactorEnrollments.userId, userId));
+  if (removeBackupCodes) {
+    await db.delete(s.twoFactorBackupCodes).where(eq(s.twoFactorBackupCodes.userId, userId));
+  }
+}
+
 export async function POST(req: NextRequest) {
   let body: ManageBody;
   try {
@@ -127,6 +136,7 @@ export async function POST(req: NextRequest) {
         await db.update(s.users).set({ role, agentId }).where(eq(s.users.id, id));
         // Revoke existing sessions so a changed role takes effect immediately in every tab/device.
         await db.delete(s.sessions).where(eq(s.sessions.userId, id));
+        await invalidateTwoFactorArtifacts(id);
         await recordAuditEvent({
           actor: user,
           action: "изменил роль сотрудника",
@@ -151,7 +161,10 @@ export async function POST(req: NextRequest) {
         if (!target) return NextResponse.json({ error: "Пользователь не найден" }, { status: 404 });
         if (target.role === "owner") return NextResponse.json({ error: "Нельзя заблокировать Owner-аккаунт" }, { status: 403 });
         await db.update(s.users).set({ status }).where(eq(s.users.id, id));
-        if (status === "blocked") await db.delete(s.sessions).where(eq(s.sessions.userId, id));
+        if (status === "blocked") {
+          await db.delete(s.sessions).where(eq(s.sessions.userId, id));
+          await invalidateTwoFactorArtifacts(id);
+        }
         await recordAuditEvent({
           actor: user,
           action: status === "blocked" ? "заблокировал аккаунт" : "разблокировал аккаунт",
@@ -176,6 +189,7 @@ export async function POST(req: NextRequest) {
         if (!target) return NextResponse.json({ error: "Пользователь не найден" }, { status: 404 });
         await db.update(s.users).set({ passwordHash: hashPassword(password) }).where(eq(s.users.id, id));
         await db.delete(s.sessions).where(eq(s.sessions.userId, id));
+        await invalidateTwoFactorArtifacts(id);
         await recordAuditEvent({
           actor: user,
           action: "сбросил пароль сотрудника",
@@ -197,6 +211,7 @@ export async function POST(req: NextRequest) {
         if (!target) return NextResponse.json({ error: "Пользователь не найден" }, { status: 404 });
         if (target.role === "owner" || target.id === user.id) return NextResponse.json({ error: "Нельзя удалить Owner-аккаунт" }, { status: 403 });
         await db.delete(s.sessions).where(eq(s.sessions.userId, id));
+        await invalidateTwoFactorArtifacts(id, true);
         await db.delete(s.users).where(eq(s.users.id, id));
         await recordAuditEvent({
           actor: user,
@@ -549,6 +564,7 @@ export async function POST(req: NextRequest) {
         if (passwordError) return NextResponse.json({ error: passwordError }, { status: 400 });
         await db.update(s.users).set({ passwordHash: hashPassword(str(d.newPassword)) }).where(eq(s.users.id, userRow.id));
         await db.delete(s.sessions).where(eq(s.sessions.userId, user.id));
+        await invalidateTwoFactorArtifacts(user.id);
         await recordAuditEvent({
           actor: user,
           action: "сменил пароль Owner",
@@ -576,6 +592,7 @@ export async function POST(req: NextRequest) {
         const exists = await db.select({ id: s.users.id }).from(s.users).where(sql`lower(${s.users.login}) = ${newLogin}`).limit(1);
         if (exists.some((existing) => existing.id !== user.id)) return NextResponse.json({ error: "Логин уже занят" }, { status: 409 });
         await db.update(s.users).set({ login: newLogin }).where(eq(s.users.id, userRow.id));
+        await invalidateTwoFactorArtifacts(user.id);
         await recordAuditEvent({
           actor: user,
           action: "сменил логин Owner",

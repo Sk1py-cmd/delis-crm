@@ -336,7 +336,7 @@ export default async function DashboardPage() {
               { icon: "🔔", title: "WebSocket уведомления", desc: "Мгновенные алерты без обновления страницы", color: "#f97316" },
               { icon: "🗺️", title: "GPS-карта агентов", desc: "Маршруты и визиты на интерактивной карте", color: "#8b5cf6" },
               { icon: "📱", title: "PWA для телефона", desc: "Установить CRM как приложение на телефон", color: "#3b82f6" },
-              { icon: "🔐", title: "2FA авторизация", desc: "Двухфакторная защита для Owner/Admin", color: "#ec4899" },
+              { icon: "🔐", title: "2FA авторизация", desc: "Двухфакторная защита для Owner", color: "#ec4899" },
             ].map((r) => (
               <div key={r.title} className="flex items-center gap-3 rounded-2xl p-3" style={{ background: "rgba(var(--table-row))" }}>
                 <span className="text-xl shrink-0">{r.icon}</span>

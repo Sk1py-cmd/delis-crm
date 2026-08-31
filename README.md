@@ -25,6 +25,12 @@ On first startup against an empty database, the CRM creates exactly one `owner` 
 
 Demo operational data is disabled by default. Set `SEED_DEMO_DATA=true` only for a local demo database.
 
+## Owner two-factor authentication
+
+Before enabling TOTP in **Security Center**, set a persistent `TWO_FACTOR_ENCRYPTION_KEY` in the deployment environment. Generate it once with `openssl rand -base64 32` and retain it securely: changing or losing this key makes encrypted TOTP secrets and recovery-code hashes unusable.
+
+The Owner can then scan the locally generated QR code with a standard TOTP app (Google Authenticator, Microsoft Authenticator, 1Password, etc.), confirm the first code, and save the one-time recovery codes. TOTP secrets are AES-256-GCM encrypted at rest; recovery codes are stored only as keyed hashes. The app never records passwords, session tokens, TOTP secrets, or recovery codes in the audit log.
+
 ## Access model
 
 - Login is by login and password. There is no public registration endpoint or UI.

@@ -15,7 +15,7 @@ function limit(value: string, max: number) {
   return value.slice(0, max);
 }
 
-const SENSITIVE_METADATA_KEY = /pass(word)?|pwd|token|secret|credential|authorization|cookie|session|api[_-]?key/i;
+const SENSITIVE_METADATA_KEY = /pass(word)?|pwd|token|secret|credential|authorization|cookie|session|api[_-]?key|totp|otp|recovery/i;
 
 export function safeAuditMetadata(metadata: AuditMetadata | undefined): AuditMetadata {
   if (!metadata) return {};
@@ -29,7 +29,7 @@ export function safeAuditMetadata(metadata: AuditMetadata | undefined): AuditMet
 
 /**
  * Writes a durable audit event. Metadata is deliberately primitive-only and
- * sensitive key names are removed as a defence in depth measure.
+ * credential, session, TOTP, and recovery-code key names are removed as defence in depth.
  */
 export async function recordAuditEvent(input: {
   actor?: AuditActor | null;
