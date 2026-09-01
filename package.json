@@ -4,9 +4,12 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "build:container": "node scripts/build-with-pglite.mjs",
     "start": "next start",
     "lint": "eslint .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test tests/**/*.test.ts",
+    "test:stage6": "node --import tsx --test tests/stage6.runtime.test.ts"
   },
   "dependencies": {
     "@types/leaflet": "^1.9.21",
@@ -19,17 +22,19 @@
     "jspdf-autotable": "^5.0.8",
     "leaflet": "^1.9.4",
     "lucide-react": "^1.27.0",
-    "next": "16.2.6",
+    "next": "16.3.4",
     "pg": "8.20.0",
     "qrcode": "^1.5.4",
     "react": "19.2.6",
     "react-dom": "19.2.6",
     "react-leaflet": "^5.0.0",
     "recharts": "^3.10.1",
-    "xlsx": "^0.18.5",
+    "write-excel-file": "^4.1.1",
     "zustand": "^5.0.14"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8",
+    "@electric-sql/pglite-socket": "^0.2.11",
     "@tailwindcss/postcss": "4.1.17",
     "@types/node": "22.19.15",
     "@types/pg": "8.18.0",
@@ -38,9 +43,13 @@
     "@types/react-dom": "19.2.3",
     "drizzle-kit": "0.31.10",
     "eslint": "9.39.4",
-    "eslint-config-next": "16.2.6",
-    "postcss": "8.5.8",
+    "eslint-config-next": "16.3.4",
+    "postcss": "8.5.26",
     "tailwindcss": "4.1.17",
+    "tsx": "^4.21.0",
     "typescript": "5.9.3"
+  },
+  "overrides": {
+    "dompurify": "3.4.14"
   }
 }

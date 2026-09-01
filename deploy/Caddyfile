@@ -1,0 +1,23 @@
+{
+	# Caddy obtains and renews TLS certificates for DOMAIN automatically.
+	email {$ACME_EMAIL}
+}
+
+{$DOMAIN} {
+	encode zstd gzip
+
+	header {
+		-Server
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		# Field agents need these capabilities for GPS and photo reports.
+		Permissions-Policy "camera=(self), geolocation=(self), microphone=()"
+	}
+
+	reverse_proxy app:3000 {
+		health_uri /api/health
+		health_interval 15s
+	}
+}

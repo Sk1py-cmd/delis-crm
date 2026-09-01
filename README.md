@@ -25,6 +25,10 @@ On first startup against an empty database, the CRM creates exactly one `owner` 
 
 Demo operational data is disabled by default. Set `SEED_DEMO_DATA=true` only for a local demo database.
 
+## Deployment
+
+For a staged Docker/Caddy/PostgreSQL deployment, secret handling, readiness checks, backups, and promotion guidance, see [docs/deployment.md](docs/deployment.md).
+
 ## Owner two-factor authentication
 
 Before enabling TOTP in **Security Center**, set a persistent `TWO_FACTOR_ENCRYPTION_KEY` in the deployment environment. Generate it once with `openssl rand -base64 32` and retain it securely: changing or losing this key makes encrypted TOTP secrets and recovery-code hashes unusable.
@@ -54,7 +58,13 @@ The supported roles are `owner`, `admin`, `manager`, `warehouse`, `agent`, `supp
 ```bash
 npm run typecheck
 npm run lint
+npm audit --omit=dev --audit-level=high
+npm test
 npm run build
 ```
 
-A reachable PostgreSQL instance and valid `DATABASE_URL` are needed to exercise login, seed, and business workflows end to end.
+By default, `npm test` starts an isolated PostgreSQL-compatible PGlite instance through the standard `pg` driver. The runtime suite boots the real schema/seed code and verifies consent rejection, immutable broadcast recipients, automation consent gates, channel attribution, and bounded Owner reporting. It does not require local PostgreSQL or application secrets. Set both `RUN_EXTERNAL_DATABASE_TESTS=true` and `TEST_DATABASE_URL` only for an isolated test database to run the same suite against a PostgreSQL service.
+
+GitHub Actions runs the same checks on every push and pull request. It directs the runtime suite and production build to a disposable PostgreSQL service and uses a dynamically generated non-production Owner password.
+
+A reachable PostgreSQL instance and valid `DATABASE_URL` are needed to exercise login, seed, and business workflows end to end outside the automated runtime suite.
