@@ -21,8 +21,9 @@ import { money, compact, dt, timeOnly } from "@/shared/lib/format";
 import { useToast } from "@/shared/ui/Toast";
 import { postManage } from "@/shared/lib/manage";
 import { exportXLSX } from "@/shared/lib/excel";
-import { ImageUploader } from "@/shared/ui/ImageUploader";
+import { VisitPhotoPicker } from "@/shared/ui/VisitPhotoPicker";
 import { ProductThumb } from "@/shared/ui/ProductThumb";
+import { postFieldwork } from "@/shared/lib/fieldwork";
 import { AgentMap, type VisitMarker } from "./AgentMap";
 import { AgentChat } from "./AgentChat";
 import { AgentCompare } from "./AgentCompare";
@@ -49,7 +50,11 @@ export interface AgentVisitLite {
   agentName: string;
   storeName: string;
   storeAddress: string;
+  /** Legacy coordinate snapshot shown in history only. */
   gpsCoords: string;
+  /** GPS fields written by the verified fieldwork endpoint and used on the map. */
+  latitude: string | null;
+  longitude: string | null;
   status: string;
   orderTotal: string;
   notes: string;
@@ -95,9 +100,9 @@ export function AgentsClient({
   const [visitForm, setVisitForm] = useState({
     storeName: "Автомойка LUX Чиланзар",
     storeAddress: "г. Ташкент, ул. Бунёдкор, 24",
-    gpsCoords: "41.2858, 69.2035",
+    gpsCoords: "",
     status: "order_placed",
-    orderTotal: "450000",
+    orderTotal: "",
     notes: "Проверена выкладка автохимии DELIS, заказано 10 шампуней и керамический воск",
     photos: [] as string[],
   });
@@ -136,35 +141,43 @@ export function AgentsClient({
       toast("Укажите название торговой точки", "err");
       return;
     }
+    const [latitude, longitude] = visitForm.gpsCoords.split(",").map((value) => Number(value.trim()));
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+      toast("Укажите фактические GPS-координаты в формате «широта, долгота»", "err");
+      return;
+    }
     setBusy(true);
     try {
-      await postManage("addAgentVisit", {
+      await postFieldwork("recordVisit", {
         agentId: selectedAgentId,
         storeName: visitForm.storeName,
         storeAddress: visitForm.storeAddress,
-        gpsCoords: visitForm.gpsCoords,
+        latitude,
+        longitude,
+        locationCapturedAt: new Date().toISOString(),
         status: visitForm.status,
         orderTotal: Number(visitForm.orderTotal) || 0,
         notes: visitForm.notes,
         photos: visitForm.photos,
       });
-      toast(`Визит торговой точки «${visitForm.storeName}» и фотоотчёт сохранены`);
+      toast(`GPS-визит торговой точки «${visitForm.storeName}» и фотоотчёт сохранены`);
       setVisitModal(false);
       setVisitForm({
-        storeName: "Автомойка LUX Чиланзар",
-        storeAddress: "г. Ташкент, ул. Бунёдкор, 24",
-        gpsCoords: "41.2858, 69.2035",
-        status: "order_placed",
-        orderTotal: "450000",
+        storeName: "",
+        storeAddress: "",
+        gpsCoords: "",
+        status: "completed",
+        orderTotal: "",
         notes: "",
         photos: [],
       });
       setTab("visits");
       router.refresh();
-    } catch (e) {
-      toast(e instanceof Error ? e.message : "Ошибка", "err");
+    } catch (error) {
+      toast(error instanceof Error ? error.message : "Ошибка", "err");
+    } finally {
+      setBusy(false);
     }
-    setBusy(false);
   };
 
   const createStoreOrder = async () => {
@@ -203,7 +216,7 @@ export function AgentsClient({
     { label: "Факт", value: compact(fact), color: "#22c55e", icon: "💰" },
     { label: "Выполнение", value: `${((fact / Math.max(plan, 1)) * 100).toFixed(0)}%`, color: "#f97316", icon: "📈" },
     { label: "Комиссия", value: compact(commission), color: "#ec4899", icon: "🤝" },
-    { label: "Визитов и точек", value: String(visits.length + agents.reduce((a, x) => a + x.visits, 0)), color: "#14b8a6", icon: "📍" },
+    { label: "GPS-визитов", value: String(visits.length), color: "#14b8a6", icon: "📍" },
   ];
 
   const exportXlsx = () => {
@@ -428,6 +441,7 @@ export function AgentsClient({
             <div className="flex flex-col gap-4 p-4">
               {visits.map((v) => {
                 const hasOrder = Number(v.orderTotal) > 0;
+                const hasVerifiedGps = v.latitude !== null && v.longitude !== null;
                 return (
                   <div
                     key={v.id}
@@ -443,8 +457,8 @@ export function AgentsClient({
 
                       <div className="flex flex-wrap items-center gap-3 text-xs muted mb-2">
                         <span className="flex items-center gap-1">
-                          <MapPin size={13} color="var(--accent)" /> GPS:{" "}
-                          <span className="font-mono text-[11px]">{v.gpsCoords}</span>
+                          <MapPin size={13} color="var(--accent)" />
+                          {hasVerifiedGps ? <><span>GPS:</span><span className="font-mono text-[11px]">{v.latitude}, {v.longitude}</span></> : <span>Архивная запись без подтверждённого GPS</span>}
                         </span>
                         <span>{dt(v.visitedAt)}</span>
                       </div>
@@ -460,6 +474,7 @@ export function AgentsClient({
                               className="rounded-xl overflow-hidden border transition-transform hover:scale-105"
                               style={{ width: 56, height: 56, borderColor: "rgba(var(--border))" }}
                             >
+                              {/* eslint-disable-next-line @next/next/no-img-element */}
                               <img
                                 src={imgUrl}
                                 alt="Фотоотчёт"
@@ -580,7 +595,7 @@ export function AgentsClient({
                             setVisitForm({ ...visitForm, gpsCoords: coords });
                             toast("📍 GPS координаты автоматически получены!");
                           },
-                          () => toast("Не удалось получить GPS, используем дефолтные", "err"),
+                          () => toast("Не удалось получить GPS. Укажите координаты вручную только по проверенному источнику.", "err"),
                         );
                       } else {
                         toast("Геолокация не поддерживается браузером", "err");
@@ -594,7 +609,7 @@ export function AgentsClient({
                 </div>
                 <input
                   className="input font-mono"
-                  placeholder="41.2858, 69.2035"
+                  placeholder="Широта, долгота"
                   value={visitForm.gpsCoords}
                   onChange={(e) => setVisitForm({ ...visitForm, gpsCoords: e.target.value })}
                 />
@@ -638,9 +653,10 @@ export function AgentsClient({
 
             <div>
               <label className="text-xs muted uppercase tracking-wider block mb-1">Фотоотчёт с торговой точки</label>
-              <ImageUploader
+              <VisitPhotoPicker
                 images={visitForm.photos}
-                onChange={(imgs) => setVisitForm({ ...visitForm, photos: imgs })}
+                onChange={(photos) => setVisitForm({ ...visitForm, photos })}
+                disabled={busy}
               />
             </div>
 
@@ -840,6 +856,7 @@ export function AgentsClient({
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-h-[60vh] overflow-y-auto">
             {selectedVisitPhotos.map((imgUrl, i) => (
               <div key={i} className="rounded-2xl overflow-hidden border" style={{ borderColor: "rgba(var(--border))" }}>
+                {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img src={imgUrl} alt={`Фотоотчёт ${i + 1}`} className="w-full h-auto object-cover" />
               </div>
             ))}

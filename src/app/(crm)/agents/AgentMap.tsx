@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import { Card, Badge } from "@/shared/ui/kit";
 import { money, dt } from "@/shared/lib/format";
 
@@ -10,7 +10,9 @@ export interface VisitMarker {
   agentName: string;
   storeName: string;
   storeAddress: string;
-  gpsCoords: string;
+  /** Only coordinates captured by the new verified fieldwork flow are mapped. */
+  latitude: string | null;
+  longitude: string | null;
   status: string;
   orderTotal: string;
   notes: string;
@@ -18,11 +20,22 @@ export interface VisitMarker {
   visitedAt: string;
 }
 
-function parseCoords(gps: string): [number, number] | null {
-  if (!gps) return null;
-  const parts = gps.split(",").map((s) => parseFloat(s.trim()));
-  if (parts.length >= 2 && !isNaN(parts[0]) && !isNaN(parts[1])) return [parts[0], parts[1]];
-  return null;
+function parseCoords(latitude: string | null, longitude: string | null): [number, number] | null {
+  if (latitude === null || longitude === null) return null;
+  const lat = Number(latitude);
+  const lng = Number(longitude);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng) || lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
+  return [lat, lng];
+}
+
+function escapePopup(value: string) {
+  return value.replace(/[&<>"']/g, (character) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    "\"": "&quot;",
+    "'": "&#039;",
+  }[character] ?? character));
 }
 
 const COLORS: Record<string, string> = {
@@ -33,10 +46,11 @@ const COLORS: Record<string, string> = {
 
 export function AgentMap({ visits, height = 400 }: { visits: VisitMarker[]; height?: number }) {
   const mapRef = useRef<HTMLDivElement>(null);
-  const mapInstanceRef = useRef<unknown>(null);
+  const mapInstanceRef = useRef<{ remove: () => void } | null>(null);
+  const verifiedGpsCount = visits.filter((visit) => parseCoords(visit.latitude, visit.longitude)).length;
 
   useEffect(() => {
-    if (!mapRef.current || mapInstanceRef.current) return;
+    if (!mapRef.current) return;
     let cancelled = false;
 
     const init = async () => {
@@ -45,7 +59,9 @@ export function AgentMap({ visits, height = 400 }: { visits: VisitMarker[]; heig
       await import("leaflet/dist/leaflet.css");
       if (cancelled || !mapRef.current) return;
 
-      const coords = visits.map((v) => ({ v, c: parseCoords(v.gpsCoords) })).filter((x) => x.c) as { v: VisitMarker; c: [number, number] }[];
+      // Do not plot legacy `gps_coords` snapshots: older records may contain demo
+      // coordinates. Only the explicit latitude/longitude fields are GPS check-ins.
+      const coords = visits.map((v) => ({ v, c: parseCoords(v.latitude, v.longitude) })).filter((x) => x.c) as { v: VisitMarker; c: [number, number] }[];
       const allCoords = coords.map((x) => x.c);
       const center: [number, number] = allCoords.length > 0 ? allCoords[0] : [41.2995, 69.2401];
 
@@ -69,17 +85,21 @@ export function AgentMap({ visits, height = 400 }: { visits: VisitMarker[]; heig
         });
 
         const marker = L.marker(c, { icon }).addTo(map);
+        const storeName = escapePopup(v.storeName);
+        const storeAddress = escapePopup(v.storeAddress);
+        const agentName = escapePopup(v.agentName);
+        const notes = escapePopup(v.notes);
         marker.bindPopup(
           `<div style="font-family:Inter,sans-serif;min-width:200px">
-            <div style="font-weight:700;font-size:14px;margin-bottom:6px">${v.storeName}</div>
-            <div style="font-size:12px;color:#6b7280;margin-bottom:4px">📍 ${v.storeAddress}</div>
-            <div style="font-size:12px;color:#6b7280">🧑‍💼 ${v.agentName}</div>
-            ${v.notes ? `<div style="font-size:11px;color:#9ca3af;margin-top:6px;line-height:1.5">${v.notes}</div>` : ""}
+            <div style="font-weight:700;font-size:14px;margin-bottom:6px">${storeName}</div>
+            <div style="font-size:12px;color:#6b7280;margin-bottom:4px">📍 ${storeAddress}</div>
+            <div style="font-size:12px;color:#6b7280">🧑‍💼 ${agentName}</div>
+            ${notes ? `<div style="font-size:11px;color:#9ca3af;margin-top:6px;line-height:1.5">${notes}</div>` : ""}
             ${v.photos.length > 0 ? `<div style="font-size:11px;color:#8b5cf6;margin-top:4px">📸 ${v.photos.length} фото</div>` : ""}
             <div style="display:flex;justify-content:space-between;margin-top:8px">
-              <span style="font-size:11px;color:#9ca3af">${dt(v.visitedAt)}</span>
+              <span style="font-size:11px;color:#9ca3af">${escapePopup(dt(v.visitedAt))}</span>
               ${Number(v.orderTotal) > 0
-                ? `<span style="font-size:13px;font-weight:700;color:#22c55e">${money(v.orderTotal)}</span>`
+                ? `<span style="font-size:13px;font-weight:700;color:#22c55e">${escapePopup(money(v.orderTotal))}</span>`
                 : `<span style="font-size:11px;color:#6b7280">Без заказа</span>`}
             </div>
           </div>`
@@ -93,7 +113,11 @@ export function AgentMap({ visits, height = 400 }: { visits: VisitMarker[]; heig
     };
 
     void init();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      mapInstanceRef.current?.remove();
+      mapInstanceRef.current = null;
+    };
   }, [visits]);
 
   return (
@@ -109,7 +133,16 @@ export function AgentMap({ visits, height = 400 }: { visits: VisitMarker[]; heig
           <Badge color="#f97316">Без заказа</Badge>
         </div>
       </div>
-      <div ref={mapRef} style={{ height, background: "#0f172a" }} />
+      <div className="relative">
+        <div ref={mapRef} style={{ height, background: "#0f172a" }} />
+        {verifiedGpsCount === 0 && (
+          <div className="absolute inset-0 grid place-items-center pointer-events-none p-6 text-center">
+            <div className="rounded-2xl px-4 py-3 text-sm" style={{ background: "rgba(15,23,42,0.82)", color: "#cbd5e1" }}>
+              Пока нет визитов с подтверждёнными GPS-координатами
+            </div>
+          </div>
+        )}
+      </div>
     </Card>
   );
 }

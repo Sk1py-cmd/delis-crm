@@ -11,8 +11,11 @@ export type AgentRouteStopStatus = (typeof AGENT_ROUTE_STOP_STATUSES)[number];
 
 export const MAX_ROUTE_STOPS = 60;
 export const MAX_VISIT_PHOTOS = 6;
-/** Base64 payload cap per photo; native images are compressed client-side before queueing. */
-export const MAX_VISIT_PHOTO_DATA_URL_LENGTH = 3_000_000;
+/**
+ * Keep six inline reports below common serverless request limits. Native images are
+ * compressed client-side before upload/queueing; larger media belongs in object storage.
+ */
+export const MAX_VISIT_PHOTO_DATA_URL_LENGTH = 500_000;
 
 export function isAgentVisitStatus(value: string): value is AgentVisitStatus {
   return (AGENT_VISIT_STATUSES as readonly string[]).includes(value);

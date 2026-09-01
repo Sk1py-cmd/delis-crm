@@ -264,7 +264,7 @@ export async function saveAgentRoute(viewer: SessionUser, input: Input, ip: stri
       const [completed] = await tx
         .select({ count: sql<string>`count(*)` })
         .from(s.agentRouteStops)
-        .where(and(eq(s.agentRouteStops.routeId, existing.id), eq(s.agentRouteStops.status, "visited")));
+        .where(and(eq(s.agentRouteStops.routeId, existing.id), inArray(s.agentRouteStops.status, ["visited", "skipped"])));
       if (Number(completed?.count ?? 0) > 0) {
         throw new FieldworkError("В маршруте уже есть выполненные точки", 409);
       }

@@ -1,5 +1,7 @@
+import type { Metadata } from "next";
 import { requireAccess } from "@/server/guard";
-import { getProducts, getAgentVisits } from "@/server/queries";
+import { getProducts } from "@/server/queries";
+import { getAgentRoutes, getFieldworkVisits } from "@/server/fieldwork";
 import { db } from "@/db";
 import { redirect } from "next/navigation";
 import { AgentPortalClient } from "./AgentPortalClient";
@@ -7,6 +9,10 @@ import * as s from "@/db/schema";
 import { eq } from "drizzle-orm";
 
 export const dynamic = "force-dynamic";
+export const metadata: Metadata = {
+  title: "DELIS Agent Mobile",
+  manifest: "/manifest-agent.json",
+};
 
 export default async function AgentPortalPage() {
   const user = await requireAccess("/agent-portal");
@@ -36,7 +42,11 @@ export default async function AgentPortalPage() {
     );
   }
 
-  const [products, visits] = await Promise.all([getProducts(), getAgentVisits(agent.id)]);
+  const [products, visits, routePlan] = await Promise.all([
+    getProducts(),
+    getFieldworkVisits(user, agent.id),
+    getAgentRoutes(user),
+  ]);
 
   return (
     <AgentPortalClient
@@ -69,16 +79,37 @@ export default async function AgentPortalPage() {
         isNew: Boolean(p.isNew),
         description: p.description ?? "",
       }))}
-      visits={visits.map((v) => ({
-        id: v.id,
-        storeName: v.storeName,
-        storeAddress: v.storeAddress,
-        gpsCoords: v.gpsCoords,
-        status: v.status,
-        orderTotal: String(v.orderTotal),
-        notes: v.notes,
-        photos: v.photos || [],
-        visitedAt: String(v.visitedAt),
+      visits={visits.map((visit) => ({
+        id: visit.id,
+        storeName: visit.storeName,
+        storeAddress: visit.storeAddress,
+        gpsCoords: visit.gpsCoords,
+        latitude: visit.latitude === null ? null : String(visit.latitude),
+        longitude: visit.longitude === null ? null : String(visit.longitude),
+        accuracyMeters: visit.accuracyMeters === null ? null : String(visit.accuracyMeters),
+        locationCapturedAt: visit.locationCapturedAt ? String(visit.locationCapturedAt) : null,
+        routeStopId: visit.routeStopId,
+        status: visit.status,
+        orderTotal: String(visit.orderTotal),
+        notes: visit.notes,
+        photos: visit.photos || [],
+        source: visit.source,
+        visitedAt: String(visit.visitedAt),
+      }))}
+      routes={routePlan.routes.map((route) => ({
+        id: route.id,
+        title: route.title,
+        routeDate: route.routeDate,
+        status: route.status,
+        notes: route.notes,
+        stops: route.stops.map((stop) => ({
+          id: stop.id,
+          sequence: stop.sequence,
+          storeName: stop.storeName,
+          storeAddress: stop.storeAddress,
+          status: stop.status,
+          notes: stop.notes,
+        })),
       }))}
     />
   );

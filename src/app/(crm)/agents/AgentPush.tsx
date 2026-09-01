@@ -1,9 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useMemo, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Bell, TrendingUp, Target, CheckCircle2 } from "lucide-react";
-import { useToast } from "@/shared/ui/Toast";
 
 interface AgentLite {
   id: number;
@@ -22,43 +21,39 @@ interface PushNotif {
 }
 
 export function AgentPush({ agents }: { agents: AgentLite[] }) {
-  const [notifs, setNotifs] = useState<PushNotif[]>([]);
   const [dismissed, setDismissed] = useState<Set<string>>(new Set());
-  const toast = useToast();
-
-  useEffect(() => {
+  const notifs = useMemo<PushNotif[]>(() => {
     const alerts: PushNotif[] = [];
-    agents.forEach((a) => {
-      const pct = (Number(a.fact) / Math.max(Number(a.plan), 1)) * 100;
-      if (pct >= 100) {
+    for (const agent of agents) {
+      const pct = (Number(agent.fact) / Math.max(Number(agent.plan), 1)) * 100;
+      if (pct >= 110) {
         alerts.push({
-          id: `plan-done-${a.id}`,
-          agentName: a.name,
+          id: `over-plan-${agent.id}`,
+          agentName: agent.name,
+          message: `Перевыполнение плана на ${(pct - 100).toFixed(0)}%! Супер-результат 🏆`,
+          color: "#8b5cf6",
+          type: "over_plan",
+        });
+      } else if (pct >= 100) {
+        alerts.push({
+          id: `plan-done-${agent.id}`,
+          agentName: agent.name,
           message: `План выполнен на ${pct.toFixed(0)}%! Начисляется премия 🎉`,
           color: "#22c55e",
           type: "plan_done",
         });
       } else if (pct >= 85) {
         alerts.push({
-          id: `near-plan-${a.id}`,
-          agentName: a.name,
+          id: `near-plan-${agent.id}`,
+          agentName: agent.name,
           message: `До плана осталось ${(100 - pct).toFixed(0)}% — агент почти выполнил!`,
           color: "#f97316",
           type: "near_plan",
         });
-      } else if (pct >= 110) {
-        alerts.push({
-          id: `over-plan-${a.id}`,
-          agentName: a.name,
-          message: `Перевыполнение плана на ${(pct - 100).toFixed(0)}%! Супер-результат 🏆`,
-          color: "#8b5cf6",
-          type: "over_plan",
-        });
       }
-    });
-    setNotifs(alerts);
+    }
+    return alerts;
   }, [agents]);
-
   const visible = notifs.filter((n) => !dismissed.has(n.id));
 
   if (visible.length === 0) return null;

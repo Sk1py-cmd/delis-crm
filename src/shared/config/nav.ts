@@ -24,6 +24,7 @@ import {
   Target,
   TrendingUp,
   BookOpen,
+  Navigation,
   Plug,
 } from "lucide-react";
 import { canAccess, ROLE_ACCESS } from "./access";
@@ -51,6 +52,7 @@ export const NAV: NavItem[] = [
   { href: "/company-os", labelKey: "companyOS", icon: Sparkles, group: "overview" },
   { href: "/analytics", labelKey: "analytics", icon: BarChart3, group: "overview" },
   { href: "/pnl", labelKey: "pnl", icon: TrendingUp, group: "overview" },
+  { href: "/reports", labelKey: "ownerReports", icon: BarChart3, group: "overview" },
   { href: "/knowledge", labelKey: "knowledge", icon: BookOpen, group: "overview" },
   { href: "/tasks", labelKey: "tasks", icon: CheckSquare, group: "overview" },
   { href: "/kpi", labelKey: "kpi", icon: Target, group: "overview" },
@@ -61,6 +63,7 @@ export const NAV: NavItem[] = [
   { href: "/suppliers", labelKey: "suppliers", icon: Building2, group: "sales" },
   { href: "/customers", labelKey: "customers", icon: Users, group: "sales" },
   { href: "/agents", labelKey: "agents", icon: UserCog, group: "sales" },
+  { href: "/routes", labelKey: "routes", icon: Navigation, group: "sales" },
   { href: "/marketing", labelKey: "marketing", icon: Sparkles, group: "sales" },
   { href: "/delivery", labelKey: "delivery", icon: Truck, group: "sales" },
   { href: "/returns", labelKey: "returns", icon: RotateCcw, group: "sales" },

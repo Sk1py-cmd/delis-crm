@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
 import {
@@ -45,12 +45,25 @@ import {
 import { Card, Badge, Avatar, Progress, Modal } from "@/shared/ui/kit";
 import { money, compact, dt, timeOnly } from "@/shared/lib/format";
 import { useToast } from "@/shared/ui/Toast";
-import { postManage } from "@/shared/lib/manage";
+import { ManageRequestError, postManage } from "@/shared/lib/manage";
 import { LOCALES, type Locale } from "@/shared/i18n/locales";
 import { useLocale } from "@/shared/store/locale";
-import { ImageUploader } from "@/shared/ui/ImageUploader";
+import { VisitPhotoPicker } from "@/shared/ui/VisitPhotoPicker";
 import { ProductThumb } from "@/shared/ui/ProductThumb";
-import { cacheProducts, getCachedProducts, saveOfflineOrder, getPendingOrders, markOrderSynced, isOnline } from "@/shared/lib/offline";
+import {
+  cacheProducts,
+  ensureOfflineOrderMutationId,
+  getPendingFieldworkMutations,
+  getPendingOrders,
+  isOnline,
+  markFieldworkMutationFailed,
+  markFieldworkMutationSynced,
+  markOrderSynced,
+  pendingFieldworkCount,
+  queueOfflineVisit,
+  saveOfflineOrder,
+} from "@/shared/lib/offline";
+import { FieldworkRequestError, postFieldwork } from "@/shared/lib/fieldwork";
 import { notifyOrderCreated, notifyAgentOrder } from "@/shared/lib/push";
 
 interface Product {
@@ -74,11 +87,49 @@ interface Visit {
   storeName: string;
   storeAddress: string;
   gpsCoords: string;
+  latitude: string | null;
+  longitude: string | null;
+  accuracyMeters: string | null;
+  locationCapturedAt: string | null;
+  routeStopId: number | null;
   status: string;
   orderTotal: string;
   notes: string;
   photos: string[];
+  source: string;
   visitedAt: string;
+}
+
+interface RouteStop {
+  id: number;
+  sequence: number;
+  storeName: string;
+  storeAddress: string;
+  status: string;
+  notes: string;
+}
+
+interface AgentRoute {
+  id: number;
+  title: string;
+  routeDate: string;
+  status: string;
+  notes: string;
+  stops: RouteStop[];
+}
+
+interface VisitForm {
+  routeStopId: number | null;
+  storeName: string;
+  storeAddress: string;
+  latitude: number | null;
+  longitude: number | null;
+  accuracyMeters: number | null;
+  locationCapturedAt: string;
+  status: string;
+  orderTotal: string;
+  notes: string;
+  photos: string[];
 }
 
 interface Agent {
@@ -295,14 +346,37 @@ const CATEGORY_ICONS: Record<string, typeof Car> = {
   Bathroom: Bath,
 };
 
+function newVisitForm(stop?: RouteStop): VisitForm {
+  return {
+    routeStopId: stop?.id ?? null,
+    storeName: stop?.storeName ?? "",
+    storeAddress: stop?.storeAddress ?? "",
+    latitude: null,
+    longitude: null,
+    accuracyMeters: null,
+    locationCapturedAt: "",
+    status: "completed",
+    orderTotal: "",
+    notes: stop?.notes ?? "",
+    photos: [],
+  };
+}
+
+function clientMutationId() {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID();
+  return `visit_${Date.now()}_${Math.random().toString(36).slice(2, 14)}`;
+}
+
 export function AgentPortalClient({
   agent,
   products,
   visits,
+  routes,
 }: {
   agent: Agent;
   products: Product[];
   visits: Visit[];
+  routes: AgentRoute[];
 }) {
   const [activeTab, setActiveTab] = useState<"home" | "catalog" | "visits" | "chat">("home");
   const [langOpen, setLangOpen] = useState(false);
@@ -311,7 +385,8 @@ export function AgentPortalClient({
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [busy, setBusy] = useState(false);
   const [isOffline, setIsOffline] = useState(false);
-  const [pendingOrders, setPendingOrders] = useState(0);
+  const [pendingSync, setPendingSync] = useState(0);
+  const [locating, setLocating] = useState(false);
   const [darkMode, setDarkMode] = useState(true);
 
   // Сторы локали и тостов
@@ -328,16 +403,14 @@ export function AgentPortalClient({
   // Состояние корзины B2B
   const [cart, setCart] = useState<CartItem[]>([]);
 
-  // Состояния форм
-  const [visitForm, setVisitForm] = useState({
-    storeName: "Автомойка LUX Чиланзар",
-    storeAddress: "г. Ташкент, ул. Бунёдкор, 24",
-    gpsCoords: "41.2858, 69.2035",
-    status: "order_placed",
-    orderTotal: "450000",
-    notes: "",
-    photos: [] as string[],
-  });
+  const availableStops = useMemo(
+    () => routes.flatMap((route) => route.stops.filter((stop) => stop.status === "planned")),
+    [routes],
+  );
+  const activeRoute = routes.find((route) => route.status === "in_progress" || route.status === "planned") ?? routes[0];
+
+  // A location is deliberately empty until the browser grants GPS permission.
+  const [visitForm, setVisitForm] = useState<VisitForm>(() => newVisitForm(availableStops[0]));
 
   const [checkoutForm, setCheckoutForm] = useState({
     storeName: "Автомойка LUX Чиланзар",
@@ -376,52 +449,80 @@ export function AgentPortalClient({
     if (products.length > 0) void cacheProducts(products);
   }, [products]);
 
-  // ── СЛУШАЕМ ОНЛАЙН/ОФФЛАЙН ──
-  useEffect(() => {
-    const upd = () => setIsOffline(!isOnline());
-    upd();
-    window.addEventListener("online", upd);
-    window.addEventListener("offline", upd);
-    return () => {
-      window.removeEventListener("online", upd);
-      window.removeEventListener("offline", upd);
-    };
-  }, []);
+  const refreshPendingSync = useCallback(async () => {
+    const [orders, fieldwork] = await Promise.all([getPendingOrders(agent.id), pendingFieldworkCount(agent.id)]);
+    setPendingSync(orders.length + fieldwork);
+  }, [agent.id]);
 
-  // ── СИНХРОНИЗАЦИЯ ОТЛОЖЕННЫХ ЗАКАЗОВ ──
-  useEffect(() => {
-    const checkPending = async () => {
-      const pending = await getPendingOrders();
-      setPendingOrders(pending.length);
-    };
-    void checkPending();
-    const iv = setInterval(checkPending, 10000);
-    return () => clearInterval(iv);
-  }, []);
-
-  const syncOfflineOrders = async () => {
-    const pending = await getPendingOrders();
-    if (pending.length === 0) { toast("Нет отложенных заказов для синхронизации"); return; }
-    setBusy(true);
-    let synced = 0;
-    for (const o of pending) {
-      try {
-        await postManage("createAgentStoreOrder", {
-          agentId: Number(o.agentId),
-          storeName: String(o.storeName),
-          storeAddress: String(o.storeAddress),
-          items: o.items as { productId: number; qty: number }[],
-          notes: String(o.notes),
-        });
-        await markOrderSynced(o.id);
-        synced++;
-      } catch { /* пропускаем ошибку */ }
+  const syncOfflineWork = useCallback(async (quiet = false) => {
+    if (!isOnline()) return;
+    const [orders, fieldwork] = await Promise.all([getPendingOrders(agent.id), getPendingFieldworkMutations(agent.id)]);
+    if (orders.length + fieldwork.length === 0) {
+      if (!quiet) toast("Нет отложенных операций для синхронизации");
+      return;
     }
-    setPendingOrders((await getPendingOrders()).length);
+
+    setBusy(true);
+    let syncedOrders = 0;
+    let syncedVisits = 0;
+    for (const order of orders) {
+      try {
+        const clientMutationId = await ensureOfflineOrderMutationId(order.id);
+        if (!clientMutationId) continue;
+        await postManage("createAgentStoreOrder", {
+          agentId: Number(order.agentId),
+          storeName: String(order.storeName),
+          storeAddress: String(order.storeAddress),
+          items: order.items as { productId: number; qty: number }[],
+          notes: String(order.notes),
+          clientMutationId,
+        });
+        await markOrderSynced(order.id);
+        syncedOrders += 1;
+      } catch {
+        // Keep an order queued: it may need stock reconciliation in the next stage.
+      }
+    }
+    for (const mutation of fieldwork) {
+      try {
+        await postFieldwork("recordVisit", { ...mutation.payload, clientMutationId: mutation.clientMutationId });
+        await markFieldworkMutationSynced(mutation.clientMutationId);
+        syncedVisits += 1;
+      } catch (error) {
+        await markFieldworkMutationFailed(mutation.clientMutationId, error instanceof Error ? error.message : "Ошибка синхронизации");
+      }
+    }
+    await refreshPendingSync();
     setBusy(false);
-    toast(`Синхронизировано заказов: ${synced}`);
-    router.refresh();
-  };
+    if (!quiet || syncedOrders + syncedVisits > 0) {
+      toast(`Синхронизировано: заказов ${syncedOrders}, визитов ${syncedVisits}`);
+    }
+    if (syncedOrders + syncedVisits > 0) router.refresh();
+  }, [agent.id, refreshPendingSync, router, toast]);
+
+  // ── СЛУШАЕМ ОНЛАЙН/ОФФЛАЙН И АВТОМАТИЧЕСКИ ПОВТОРЯЕМ ОЧЕРЕДЬ ──
+  useEffect(() => {
+    const offline = () => setIsOffline(true);
+    const online = () => {
+      setIsOffline(false);
+      void syncOfflineWork(true);
+    };
+    const currentlyOnline = isOnline();
+    setIsOffline(!currentlyOnline);
+    if (currentlyOnline) void syncOfflineWork(true);
+    window.addEventListener("online", online);
+    window.addEventListener("offline", offline);
+    return () => {
+      window.removeEventListener("online", online);
+      window.removeEventListener("offline", offline);
+    };
+  }, [syncOfflineWork]);
+
+  useEffect(() => {
+    void refreshPendingSync();
+    const interval = window.setInterval(() => { void refreshPendingSync(); }, 15_000);
+    return () => window.clearInterval(interval);
+  }, [refreshPendingSync]);
 
   // Фильтрация каталога
   const filteredProducts = useMemo(() => {
@@ -479,40 +580,109 @@ export function AgentPortalClient({
     return (cartTotal * agent.commission) / 100;
   }, [cartTotal, agent.commission]);
 
+  const captureGps = () => {
+    if (!navigator.geolocation) {
+      toast("Браузер не поддерживает GPS-геолокацию", "err");
+      return;
+    }
+    setLocating(true);
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        const captured = new Date(position.timestamp || Date.now()).toISOString();
+        setVisitForm((current) => ({
+          ...current,
+          latitude: position.coords.latitude,
+          longitude: position.coords.longitude,
+          accuracyMeters: Number.isFinite(position.coords.accuracy) ? position.coords.accuracy : null,
+          locationCapturedAt: captured,
+        }));
+        setLocating(false);
+        toast(`${utr.geolocationSuccess} Точность: ${Math.round(position.coords.accuracy)} м`);
+      },
+      (error) => {
+        setLocating(false);
+        const detail = error.code === error.PERMISSION_DENIED
+          ? "Разрешите доступ к геопозиции в настройках браузера"
+          : "Не удалось определить местоположение. Попробуйте на открытом воздухе.";
+        toast(detail, "err");
+      },
+      { enableHighAccuracy: true, timeout: 15_000, maximumAge: 0 },
+    );
+  };
+
+  const selectRouteStop = (id: number | null) => {
+    const stop = availableStops.find((item) => item.id === id);
+    setVisitForm((current) => ({
+      ...current,
+      routeStopId: id,
+      storeName: stop?.storeName ?? current.storeName,
+      storeAddress: stop?.storeAddress ?? current.storeAddress,
+      notes: current.notes || stop?.notes || "",
+    }));
+  };
+
+  const openVisit = (stop?: RouteStop) => {
+    setVisitForm(newVisitForm(stop ?? availableStops[0]));
+    setVisitModal(true);
+  };
+
   const handleRecordVisit = async () => {
     if (!visitForm.storeName.trim()) {
       toast(utr.storeName, "err");
       return;
     }
+    if (visitForm.latitude === null || visitForm.longitude === null) {
+      toast("Сначала зафиксируйте реальные GPS-координаты", "err");
+      return;
+    }
+
+    const payload = {
+      agentId: agent.id,
+      routeStopId: visitForm.routeStopId,
+      storeName: visitForm.storeName,
+      storeAddress: visitForm.storeAddress,
+      latitude: visitForm.latitude,
+      longitude: visitForm.longitude,
+      accuracyMeters: visitForm.accuracyMeters,
+      locationCapturedAt: visitForm.locationCapturedAt || new Date().toISOString(),
+      status: visitForm.status,
+      orderTotal: Number(visitForm.orderTotal) || 0,
+      notes: visitForm.notes,
+      photos: visitForm.photos,
+    };
+    const mutationId = clientMutationId();
     setBusy(true);
     try {
-      await postManage("addAgentVisit", {
-        agentId: agent.id,
-        storeName: visitForm.storeName,
-        storeAddress: visitForm.storeAddress,
-        gpsCoords: visitForm.gpsCoords,
-        status: visitForm.status,
-        orderTotal: Number(visitForm.orderTotal) || 0,
-        notes: visitForm.notes,
-        photos: visitForm.photos,
-      });
-      toast(`✅ ${utr.geolocationSuccess}`);
+      if (isOffline) {
+        const queued = await queueOfflineVisit({ ...payload, offline: true }, mutationId);
+        if (!queued) throw new Error("Не удалось сохранить визит в офлайн-очередь");
+        await refreshPendingSync();
+        toast("GPS-визит и фотоотчёт сохранены на устройстве. Отправим при появлении интернета.");
+      } else {
+        await postFieldwork("recordVisit", { ...payload, offline: false, clientMutationId: mutationId });
+        toast(`✅ ${utr.geolocationSuccess}`);
+        router.refresh();
+      }
       setVisitModal(false);
-      setVisitForm({
-        storeName: "Автомойка LUX Чиланзар",
-        storeAddress: "г. Ташкент, ул. Бунёдкор, 24",
-        gpsCoords: "41.2858, 69.2035",
-        status: "order_placed",
-        orderTotal: "450000",
-        notes: "",
-        photos: [],
-      });
+      setVisitForm(newVisitForm(availableStops.find((stop) => stop.id !== visitForm.routeStopId)));
       setActiveTab("visits");
-      router.refresh();
-    } catch (e) {
-      toast(e instanceof Error ? e.message : "Error", "err");
+    } catch (error) {
+      // A request can fail after the server accepted it. Queue the same idempotency key,
+      // so replay cannot create a duplicate visit when connectivity returns.
+      if (!isOffline && (!(error instanceof FieldworkRequestError) || error.status >= 500)) {
+        const queued = await queueOfflineVisit({ ...payload, offline: true }, mutationId);
+        if (queued) {
+          await refreshPendingSync();
+          toast("Связь прервалась: визит сохранён в офлайн-очереди", "err");
+        } else {
+          toast(error instanceof Error ? error.message : "Ошибка", "err");
+        }
+      } else {
+        toast(error instanceof Error ? error.message : "Ошибка", "err");
+      }
+    } finally {
+      setBusy(false);
     }
-    setBusy(false);
   };
 
   const handleCreateB2BOrder = async () => {
@@ -520,49 +690,65 @@ export function AgentPortalClient({
       toast(utr.storeName, "err");
       return;
     }
+    if (!cart.length) {
+      toast("Добавьте хотя бы один товар в корзину", "err");
+      return;
+    }
+    const payload = {
+      agentId: agent.id,
+      storeName: checkoutForm.storeName,
+      storeAddress: checkoutForm.storeAddress,
+      items: cart.map((item) => ({ productId: item.product.id, qty: item.qty })),
+      notes: checkoutForm.notes,
+    };
+    const mutationId = clientMutationId();
     setBusy(true);
 
-    // Оффлайн: сохраняем локально
     if (isOffline) {
-      await saveOfflineOrder({
-        agentId: agent.id,
-        storeName: checkoutForm.storeName,
-        storeAddress: checkoutForm.storeAddress,
-        items: cart.map((item) => ({ productId: item.product.id, qty: item.qty })),
-        notes: checkoutForm.notes,
-      });
+      const saved = await saveOfflineOrder({ ...payload, clientMutationId: mutationId });
+      if (!saved) {
+        setBusy(false);
+        toast("Не удалось сохранить заказ на устройстве", "err");
+        return;
+      }
       setCheckoutModal(false);
       setCart([]);
-      const pending = await getPendingOrders();
-      setPendingOrders(pending.length);
+      await refreshPendingSync();
       setBusy(false);
-      toast(`💾 Заказ сохранён локально! Синхронизируется при восстановлении интернета`);
+      toast("💾 Заказ сохранён локально и синхронизируется при появлении интернета");
       return;
     }
 
     try {
-      await postManage("createAgentStoreOrder", {
-        agentId: agent.id,
-        storeName: checkoutForm.storeName,
-        storeAddress: checkoutForm.storeAddress,
-        items: cart.map((item) => ({ productId: item.product.id, qty: item.qty })),
-        notes: checkoutForm.notes,
-      });
+      await postManage("createAgentStoreOrder", { ...payload, clientMutationId: mutationId });
       toast(`🎉 ${utr.orderPlaced}!`);
       setCheckoutModal(false);
       setCart([]);
       setActiveTab("visits");
       router.refresh();
-    } catch (e) {
-      toast(e instanceof Error ? e.message : "Error", "err");
+    } catch (error) {
+      // Do not hide validation or access errors in an offline queue. Network failures
+      // and server errors reuse the same key, so a replay cannot duplicate the order.
+      if (error instanceof ManageRequestError && error.status < 500) {
+        toast(error.message, "err");
+        return;
+      }
+      const queued = await saveOfflineOrder({ ...payload, clientMutationId: mutationId });
+      if (queued) {
+        await refreshPendingSync();
+        toast("Связь прервалась: заказ сохранён в офлайн-очереди", "err");
+      } else {
+        toast(error instanceof Error ? error.message : "Ошибка", "err");
+      }
+    } finally {
+      setBusy(false);
     }
-    setBusy(false);
   };
 
   const logout = async () => {
     await fetch("/api/auth/logout", { method: "POST" });
     localStorage.removeItem("delis_token");
-    window.location.assign("/");
+    router.replace("/");
   };
 
   return (
@@ -581,12 +767,12 @@ export function AgentPortalClient({
         {/* OFFLINE BANNER */}
         {isOffline && (
           <div className="absolute top-0 left-0 right-0 bg-amber-500 text-black text-[10px] font-bold text-center py-1">
-            ⚠️ Оффлайн — заказы сохраняются локально
+            ⚠️ Оффлайн — визиты, фото и заказы сохраняются локально
           </div>
         )}
-        {!isOffline && pendingOrders > 0 && (
-          <button onClick={syncOfflineOrders} className="absolute top-0 left-0 right-0 bg-green-500 text-white text-[10px] font-bold text-center py-1">
-            📡 {pendingOrders} отложенных заказа — нажмите для синхронизации
+        {!isOffline && pendingSync > 0 && (
+          <button onClick={() => void syncOfflineWork()} className="absolute top-0 left-0 right-0 bg-green-500 text-white text-[10px] font-bold text-center py-1">
+            📡 {pendingSync} отложенных операций — нажмите для синхронизации
           </button>
         )}
         <div className="flex items-center gap-3">
@@ -754,7 +940,7 @@ export function AgentPortalClient({
               <motion.button
                 whileTap={{ scale: 0.96 }}
                 className="btn btn-primary justify-center !py-3.5 !rounded-2xl shadow-lg flex items-center gap-2"
-                onClick={() => setVisitModal(true)}
+                onClick={() => openVisit()}
               >
                 <Camera size={18} />
                 <span className="font-bold text-xs">{utr.addVisit}</span>
@@ -776,39 +962,26 @@ export function AgentPortalClient({
 
             {/* Маршрут на сегодня */}
             <Card hover={false} className="!p-4">
-              <div className="font-bold text-sm mb-2.5 flex items-center justify-between">
-                <span className="flex items-center gap-2">
-                  <Compass size={16} color="var(--primary)" /> {utr.route}
-                </span>
-                <Badge color="var(--primary)">{agent.region}</Badge>
+              <div className="font-bold text-sm mb-2.5 flex items-center justify-between gap-2">
+                <span className="flex items-center gap-2 min-w-0"><Compass size={16} color="var(--primary)" /> <span className="truncate">{activeRoute?.title || utr.route}</span></span>
+                <Badge color={activeRoute?.status === "completed" ? "#22c55e" : "var(--primary)"}>{activeRoute ? `${activeRoute.stops.filter((stop) => stop.status !== "planned").length}/${activeRoute.stops.length}` : agent.region}</Badge>
               </div>
-
-              <div
-                className="rounded-2xl p-3.5 flex items-center gap-3"
-                style={{
-                  background: "rgba(var(--table-row))",
-                  border: "1px dashed rgba(var(--border))",
-                }}
-              >
-                <div
-                  className="w-10 h-10 rounded-2xl grid place-items-center shrink-0 font-extrabold text-lg"
-                  style={{
-                    background: "linear-gradient(135deg, var(--primary), var(--accent))",
-                    color: "#fff",
-                  }}
-                >
-                  📍
+              {activeRoute ? (
+                <div className="flex flex-col gap-2">
+                  {activeRoute.stops.slice(0, 4).map((stop) => (
+                    <button key={stop.id} type="button" onClick={() => openVisit(stop)} disabled={stop.status !== "planned"} className="rounded-2xl p-2.5 flex items-center gap-2.5 text-left disabled:opacity-60" style={{ background: "rgba(var(--table-row))", border: "1px dashed rgba(var(--border))" }}>
+                      <div className="w-7 h-7 rounded-full grid place-items-center text-[0.65rem] font-bold shrink-0" style={{ background: stop.status === "visited" ? "var(--success)" : "var(--surface)", color: stop.status === "visited" ? "white" : "var(--muted)" }}>{stop.status === "visited" ? "✓" : stop.sequence}</div>
+                      <div className="min-w-0"><div className="text-xs font-bold truncate">{stop.storeName}</div><div className="text-[10px] muted truncate">{stop.storeAddress || "Адрес не указан"}</div></div>
+                    </button>
+                  ))}
+                  {activeRoute.stops.length > 4 && <div className="text-[10px] muted text-center">Ещё точек: {activeRoute.stops.length - 4}</div>}
                 </div>
-                <div className="min-w-0 flex-1">
-                  <div className="text-xs font-bold leading-tight">
-                    {agent.route || "Чиланзар — Юнусабад (Автомойки & Детейлинг)"}
-                  </div>
-                  <div className="text-[10px] muted mt-1 flex items-center gap-1">
-                    <Clock size={10} />
-                    <span>8 запланированных точек · План: {money(Number(agent.plan) / 22)}</span>
-                  </div>
+              ) : (
+                <div className="rounded-2xl p-3.5 flex items-center gap-3" style={{ background: "rgba(var(--table-row))", border: "1px dashed rgba(var(--border))" }}>
+                  <div className="w-10 h-10 rounded-2xl grid place-items-center shrink-0 font-extrabold text-lg" style={{ background: "linear-gradient(135deg, var(--primary), var(--accent))", color: "#fff" }}>📍</div>
+                  <div className="min-w-0 flex-1"><div className="text-xs font-bold leading-tight">Маршрут на сегодня ещё не назначен</div><div className="text-[10px] muted mt-1">Можно зафиксировать внеплановый GPS-визит с фотоотчётом.</div></div>
                 </div>
-              </div>
+              )}
             </Card>
 
             {/* Топ популярной автохимии */}
@@ -1022,7 +1195,7 @@ export function AgentPortalClient({
             <div className="flex items-center justify-between px-1">
               <span className="font-extrabold text-sm">{utr.visitHistory}</span>
               <button
-                onClick={() => setVisitModal(true)}
+                onClick={() => openVisit()}
                 className="btn btn-primary !py-1 !px-2.5 !text-xs !rounded-xl"
               >
                 <Plus size={13} /> {utr.addVisit}
@@ -1032,6 +1205,7 @@ export function AgentPortalClient({
             <div className="flex flex-col gap-3">
               {visits.map((v) => {
                 const hasOrder = Number(v.orderTotal) > 0;
+                const hasVerifiedGps = v.latitude !== null && v.longitude !== null;
                 return (
                   <Card key={v.id} hover={false} className="!p-4 flex flex-col gap-2.5">
                     <div className="flex items-start justify-between gap-2">
@@ -1060,6 +1234,7 @@ export function AgentPortalClient({
                             key={idx}
                             className="w-14 h-14 rounded-xl overflow-hidden border border-white/10 shadow"
                           >
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
                             <img src={p} alt="Отчёт" className="w-full h-full object-cover" />
                           </div>
                         ))}
@@ -1067,8 +1242,9 @@ export function AgentPortalClient({
                     )}
 
                     <div className="flex justify-between items-center text-[10px] muted pt-2 border-t border-white/5 mt-1 font-semibold">
-                      <span className="flex items-center gap-1 font-mono">
-                        <MapPin size={11} color="var(--accent)" /> {v.gpsCoords}
+                      <span className="flex items-center gap-1">
+                        <MapPin size={11} color="var(--accent)" />
+                        {hasVerifiedGps ? <span className="font-mono">{v.latitude}, {v.longitude}</span> : <span>Архивный визит без подтверждённого GPS</span>}
                       </span>
                       {hasOrder ? (
                         <span className="text-green-400 font-extrabold">{money(v.orderTotal)}</span>
@@ -1285,147 +1461,66 @@ export function AgentPortalClient({
 
       {/* ─── MODAL: CHECK-IN & PHOTO REPORT ─── */}
       {visitModal && (
-        <Modal open onClose={() => setVisitModal(false)} title={utr.gpsCheckin} wide>
+        <Modal open onClose={() => { if (!busy && !locating) setVisitModal(false); }} title={utr.gpsCheckin} wide>
           <div className="flex flex-col gap-3.5">
-            <div>
-              <label className="text-[10px] muted uppercase tracking-wider block mb-1">
-                {utr.storeName}
-              </label>
-              <input
-                className="input !text-xs !rounded-xl"
-                placeholder="Автомойка LUX Чиланзар"
-                value={visitForm.storeName}
-                onChange={(e) => setVisitForm({ ...visitForm, storeName: e.target.value })}
-              />
-            </div>
-
-            <div>
-              <label className="text-[10px] muted uppercase tracking-wider block mb-1">
-                {utr.storeAddress}
-              </label>
-              <input
-                className="input !text-xs !rounded-xl"
-                placeholder="г. Ташкент, ул. Бунёдкор, 24"
-                value={visitForm.storeAddress}
-                onChange={(e) => setVisitForm({ ...visitForm, storeAddress: e.target.value })}
-              />
-            </div>
-
-            {/* GPS Geolocation check-in */}
-            <div className="rounded-2xl p-3 bg-white/5 border border-white/10 flex flex-col gap-2">
-              <div className="flex justify-between items-center">
-                <span className="text-xs font-bold flex items-center gap-1.5">
-                  <MapPin size={13} color="var(--primary)" /> GPS Координаты
-                </span>
-                <motion.button
-                  whileTap={{ scale: 0.95 }}
-                  type="button"
-                  onClick={() => {
-                    if (navigator.geolocation) {
-                      navigator.geolocation.getCurrentPosition(
-                        (p) => {
-                          const c = `${p.coords.latitude.toFixed(4)}, ${p.coords.longitude.toFixed(4)}`;
-                          setVisitForm({ ...visitForm, gpsCoords: c });
-                          toast(utr.geolocationSuccess);
-                        },
-                        () => {
-                          setVisitForm({ ...visitForm, gpsCoords: "41.2858, 69.2035" });
-                          toast("📍 GPS координаты зафиксированы!");
-                        }
-                      );
-                    }
-                  }}
-                  className="btn btn-primary !py-1 !px-2.5 !text-[11px] !rounded-xl font-bold"
-                >
-                  📍 Зафиксировать GPS
-                </motion.button>
-              </div>
-              <input
-                className="input !text-xs font-mono !py-1.5 !rounded-xl"
-                placeholder="41.2858, 69.2035"
-                value={visitForm.gpsCoords}
-                onChange={(e) => setVisitForm({ ...visitForm, gpsCoords: e.target.value })}
-              />
-            </div>
-
-            {/* Статус и сумма */}
-            <div className="grid grid-cols-2 gap-2">
+            {availableStops.length > 0 && (
               <div>
-                <label className="text-[10px] muted uppercase tracking-wider block mb-1">
-                  {utr.visitStatusLabel}
-                </label>
-                <select
-                  className="input !text-xs !rounded-xl"
-                  value={visitForm.status}
-                  onChange={(e) => setVisitForm({ ...visitForm, status: e.target.value })}
-                >
-                  <option value="order_placed">{utr.orderPlaced}</option>
-                  <option value="completed">{utr.completedNoOrder}</option>
+                <label className="text-[10px] muted uppercase tracking-wider block mb-1">Точка маршрута</label>
+                <select className="input !text-xs !rounded-xl" value={visitForm.routeStopId ?? ""} onChange={(event) => selectRouteStop(event.target.value ? Number(event.target.value) : null)}>
+                  <option value="">Внеплановый визит</option>
+                  {availableStops.map((stop) => <option key={stop.id} value={stop.id}>#{stop.sequence} · {stop.storeName}</option>)}
                 </select>
               </div>
+            )}
+            <div>
+              <label className="text-[10px] muted uppercase tracking-wider block mb-1">{utr.storeName}</label>
+              <input className="input !text-xs !rounded-xl" maxLength={220} placeholder="Автомойка LUX Чиланзар" value={visitForm.storeName} onChange={(event) => setVisitForm({ ...visitForm, storeName: event.target.value })} />
+            </div>
+            <div>
+              <label className="text-[10px] muted uppercase tracking-wider block mb-1">{utr.storeAddress}</label>
+              <input className="input !text-xs !rounded-xl" maxLength={400} placeholder="г. Ташкент, ул. Бунёдкор, 24" value={visitForm.storeAddress} onChange={(event) => setVisitForm({ ...visitForm, storeAddress: event.target.value })} />
+            </div>
 
+            <div className="rounded-2xl p-3 bg-white/5 border border-white/10 flex flex-col gap-2">
+              <div className="flex justify-between items-center gap-3">
+                <span className="text-xs font-bold flex items-center gap-1.5"><MapPin size={13} color="var(--primary)" /> Реальный GPS-чек-ин</span>
+                <motion.button whileTap={{ scale: 0.95 }} type="button" disabled={locating || busy} onClick={captureGps} className="btn btn-primary !py-1 !px-2.5 !text-[11px] !rounded-xl font-bold">
+                  {locating ? "Определяем…" : "📍 Зафиксировать GPS"}
+                </motion.button>
+              </div>
+              {visitForm.latitude !== null && visitForm.longitude !== null ? (
+                <div className="rounded-xl px-2.5 py-2 text-[11px] font-mono" style={{ background: "rgba(var(--success-rgb,34,197,94),0.12)" }}>
+                  {visitForm.latitude.toFixed(6)}, {visitForm.longitude.toFixed(6)}{visitForm.accuracyMeters !== null ? ` · ±${Math.round(visitForm.accuracyMeters)} м` : ""}
+                </div>
+              ) : <div className="text-[11px] muted">Координаты ещё не зафиксированы. Для отчёта используется только GPS браузера, без подстановки тестовой точки.</div>}
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
               <div>
-                <label className="text-[10px] muted uppercase tracking-wider block mb-1">
-                  Сумма заказа (сум)
-                </label>
-                <input
-                  type="number"
-                  className="input !text-xs !rounded-xl"
-                  placeholder="450000"
-                  value={visitForm.orderTotal}
-                  onChange={(e) => setVisitForm({ ...visitForm, orderTotal: e.target.value })}
-                />
+                <label className="text-[10px] muted uppercase tracking-wider block mb-1">{utr.visitStatusLabel}</label>
+                <select className="input !text-xs !rounded-xl" value={visitForm.status} onChange={(event) => setVisitForm({ ...visitForm, status: event.target.value, orderTotal: event.target.value === "no_order" ? "" : visitForm.orderTotal })}>
+                  <option value="order_placed">{utr.orderPlaced}</option>
+                  <option value="completed">{utr.completedNoOrder}</option>
+                  <option value="no_order">Визит без заказа</option>
+                </select>
+              </div>
+              <div>
+                <label className="text-[10px] muted uppercase tracking-wider block mb-1">Сумма заказа (сум)</label>
+                <input type="number" min="0" className="input !text-xs !rounded-xl" placeholder="450000" value={visitForm.orderTotal} disabled={visitForm.status === "no_order"} onChange={(event) => setVisitForm({ ...visitForm, orderTotal: event.target.value })} />
               </div>
             </div>
 
-            {/* Быстрые теги мерчендайзинга */}
             <div>
-              <label className="text-[10px] muted uppercase tracking-wider block mb-1.5">
-                {utr.merchandisingTags}
-              </label>
-              <div className="flex flex-wrap gap-1.5">
-                {[utr.tag1, utr.tag2, utr.tag3, utr.tag4, utr.tag5].map((tag) => (
-                  <button
-                    key={tag}
-                    type="button"
-                    onClick={() =>
-                      setVisitForm((prev) => ({
-                        ...prev,
-                        notes: prev.notes ? `${prev.notes} · ${tag}` : tag,
-                      }))
-                    }
-                    className="chip !text-[10px] !py-1 !px-2.5 !rounded-xl"
-                  >
-                    + {tag}
-                  </button>
-                ))}
-              </div>
+              <label className="text-[10px] muted uppercase tracking-wider block mb-1.5">{utr.merchandisingTags}</label>
+              <div className="flex flex-wrap gap-1.5">{[utr.tag1, utr.tag2, utr.tag3, utr.tag4, utr.tag5].map((tag) => <button key={tag} type="button" onClick={() => setVisitForm((current) => ({ ...current, notes: current.notes ? `${current.notes} · ${tag}` : tag }))} className="chip !text-[10px] !py-1 !px-2.5 !rounded-xl">+ {tag}</button>)}</div>
             </div>
-
-            <textarea
-              className="input !text-xs min-h-16 !rounded-2xl"
-              placeholder="Дополнительные примечания по точке…"
-              value={visitForm.notes}
-              onChange={(e) => setVisitForm({ ...visitForm, notes: e.target.value })}
-            />
-
+            <textarea className="input !text-xs min-h-16 !rounded-2xl" maxLength={4000} placeholder="Дополнительные примечания по точке…" value={visitForm.notes} onChange={(event) => setVisitForm({ ...visitForm, notes: event.target.value })} />
             <div>
-              <label className="text-[10px] muted uppercase tracking-wider block mb-1">
-                Фотоотчёт с торговой точки
-              </label>
-              <ImageUploader
-                images={visitForm.photos}
-                onChange={(imgs) => setVisitForm({ ...visitForm, photos: imgs })}
-              />
+              <label className="text-[10px] muted uppercase tracking-wider block mb-1">Фотоотчёт с торговой точки</label>
+              <VisitPhotoPicker images={visitForm.photos} onChange={(photos) => setVisitForm({ ...visitForm, photos })} disabled={busy || locating} />
             </div>
-
-            <motion.button
-              whileTap={{ scale: 0.97 }}
-              className="btn btn-primary justify-center !py-3 !rounded-2xl font-bold mt-2"
-              disabled={busy}
-              onClick={handleRecordVisit}
-            >
-              {busy ? "Сохраняем…" : utr.saveVisitBtn}
+            <motion.button whileTap={{ scale: 0.97 }} className="btn btn-primary justify-center !py-3 !rounded-2xl font-bold mt-2" disabled={busy || locating} onClick={() => void handleRecordVisit()}>
+              {busy ? "Сохраняем…" : isOffline ? "Сохранить офлайн-визит" : utr.saveVisitBtn}
             </motion.button>
           </div>
         </Modal>
