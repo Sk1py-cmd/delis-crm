@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Search, Send, Paperclip, FileText, Image as ImageIcon, Film, Zap, Check, CheckCheck, Mic, ArrowLeft } from "lucide-react";
+import { Search, Send, Paperclip, FileText, Image as ImageIcon, Film, Zap, CheckCheck, Mic, ArrowLeft } from "lucide-react";
 import { Card, Badge, Avatar } from "@/shared/ui/kit";
 import { dt, timeOnly, SOURCE_LABEL } from "@/shared/lib/format";
 import { MediaPreview, type MediaFile } from "@/shared/ui/MediaUploader";
@@ -41,6 +41,7 @@ export function ChatClient({ threads, initialId }: { threads: Thread[]; initialI
   const [loading, setLoading] = useState(true);
   const [mobile, setMobile] = useState<"list" | "chat">("list");
   const endRef = useRef<HTMLDivElement>(null);
+  const optimisticId = useRef(0);
 
   const templates = [
     "Заказ принят ✅",
@@ -50,16 +51,28 @@ export function ChatClient({ threads, initialId }: { threads: Thread[]; initialI
     "Дарим персональную скидку 15% 💜",
   ];
 
-  const load = async (id: number) => {
+  const selectThread = (id: number) => {
     setLoading(true);
-    const res = await fetch(`/api/messages?customerId=${id}`);
-    const data = (await res.json()) as { messages: Msg[] };
-    setMsgs(data.messages);
-    setLoading(false);
+    setActive(id);
+    setMobile("chat");
   };
 
   useEffect(() => {
-    if (active) void load(active);
+    if (!active) return;
+    let cancelled = false;
+    void fetch(`/api/messages?customerId=${active}`)
+      .then(async (response) => (await response.json()) as { messages: Msg[] })
+      .then((data) => {
+        if (cancelled) return;
+        setMsgs(data.messages);
+        setLoading(false);
+      })
+      .catch(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [active]);
 
   useEffect(() => {
@@ -107,7 +120,7 @@ export function ChatClient({ threads, initialId }: { threads: Thread[]; initialI
     for (const f of files) {
       const label = f.kind === "image" ? "📷 Фото" : f.kind === "video" ? "🎬 Видео" : "📄 Документ";
       const fileMsg: Msg = {
-        id: Date.now() + Math.random(),
+        id: --optimisticId.current,
         customerId: active,
         body: `${label}: ${f.name}`,
         fromAdmin: true,
@@ -124,7 +137,7 @@ export function ChatClient({ threads, initialId }: { threads: Thread[]; initialI
 
     if (body.trim()) {
       const optimistic: Msg = {
-        id: Date.now(),
+        id: --optimisticId.current,
         customerId: active,
         body,
         fromAdmin: true,
@@ -164,10 +177,7 @@ export function ChatClient({ threads, initialId }: { threads: Thread[]; initialI
             <motion.button
               key={t.id}
               layout
-              onClick={() => {
-                setActive(t.id);
-                setMobile("chat");
-              }}
+              onClick={() => selectThread(t.id)}
               whileHover={{ x: 3 }}
               className="w-full flex items-center gap-3 p-2.5 rounded-2xl text-left mb-1"
               style={{
@@ -240,7 +250,7 @@ export function ChatClient({ threads, initialId }: { threads: Thread[]; initialI
                   {m.body}
                 </div>
                 <div className={`flex items-center gap-1 mt-1 text-[0.68rem] muted ${m.fromAdmin ? "justify-end" : ""}`}>
-                  {timeOnly(m.createdAt)} {m.fromAdmin && (Math.random() > 0.5 ? <CheckCheck size={12} /> : <Check size={12} />)}
+                  {timeOnly(m.createdAt)} {m.fromAdmin && <CheckCheck size={12} />}
                 </div>
               </motion.div>
             ))}
@@ -274,6 +284,7 @@ export function ChatClient({ threads, initialId }: { threads: Thread[]; initialI
             {attachments.map((f, i) => (
               <div key={i} className="relative rounded-xl overflow-hidden" style={{ width: 60, height: 60, border: "1px solid rgba(var(--border))" }}>
                 {f.kind === "image" ? (
+                  // eslint-disable-next-line @next/next/no-img-element
                   <img src={f.url} alt="" className="w-full h-full object-cover" />
                 ) : (
                   <div className="w-full h-full grid place-items-center text-xl" style={{ background: "rgba(var(--table-row))" }}>

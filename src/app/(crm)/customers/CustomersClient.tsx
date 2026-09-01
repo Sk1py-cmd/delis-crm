@@ -21,15 +21,38 @@ export interface CustomerLite {
   source: string;
   isVip: boolean;
   bonus: number;
+  marketingConsent: boolean;
   ordersCount: number;
   totalSpent: string;
   createdAt: string;
   lastActiveAt: string;
 }
 
-export function CustomersClient({ customers }: { customers: CustomerLite[] }) {
+type CustomerSegment = "all" | "lead" | "new" | "repeat" | "sleeping" | "vip" | "consented";
+
+const SEGMENT_LABELS: Record<CustomerSegment, string> = {
+  all: "Все сегменты",
+  lead: "Лиды",
+  new: "Новые",
+  repeat: "Повторные",
+  sleeping: "Неактивные",
+  vip: "VIP",
+  consented: "С согласием",
+};
+
+function customerSegment(customer: CustomerLite, referenceAt: string): Exclude<CustomerSegment, "all" | "consented"> {
+  if (customer.isVip) return "vip";
+  if (customer.ordersCount === 0) return "lead";
+  const inactiveDays = (new Date(referenceAt).getTime() - new Date(customer.lastActiveAt).getTime()) / 86_400_000;
+  if (inactiveDays >= 30) return "sleeping";
+  if (customer.ordersCount >= 2) return "repeat";
+  return "new";
+}
+
+export function CustomersClient({ customers, referenceAt }: { customers: CustomerLite[]; referenceAt: string }) {
   const [q, setQ] = useState("");
   const [src, setSrc] = useState("all");
+  const [segment, setSegment] = useState<CustomerSegment>("all");
   const tr = useT();
 
   const filtered = useMemo(
@@ -37,15 +60,16 @@ export function CustomersClient({ customers }: { customers: CustomerLite[] }) {
       customers.filter(
         (c) =>
           (src === "all" || (src === "vip" ? c.isVip : c.source === src)) &&
+          (segment === "all" || (segment === "consented" ? c.marketingConsent : customerSegment(c, referenceAt) === segment)) &&
           (q === "" || `${c.firstName} ${c.lastName} ${c.username} ${c.phone} ${c.city}`.toLowerCase().includes(q.toLowerCase())),
       ),
-    [customers, q, src],
+    [customers, q, referenceAt, segment, src],
   );
 
   const revenue = customers.reduce((a, c) => a + Number(c.totalSpent), 0);
 
   const exportXlsx = () => {
-    const headers = ["Имя", "Фамилия", "Username", "Telegram ID", "Телефон", "Город", "Источник", "VIP", "Бонусы", "Заказов", "Сумма покупок", "Регистрация", "Последняя активность"];
+    const headers = ["Имя", "Фамилия", "Username", "Telegram ID", "Телефон", "Город", "Источник", "Сегмент", "VIP", "Согласие на маркетинг", "Бонусы", "Заказов", "Сумма покупок", "Регистрация", "Последняя активность"];
     const rows = filtered.map((c) => [
       c.firstName,
       c.lastName,
@@ -54,7 +78,9 @@ export function CustomersClient({ customers }: { customers: CustomerLite[] }) {
       c.phone,
       c.city,
       SOURCE_LABEL[c.source] ?? c.source,
+      SEGMENT_LABELS[customerSegment(c, referenceAt)],
       c.isVip ? "Да" : "Нет",
+      c.marketingConsent ? "Да" : "Нет",
       String(c.bonus),
       String(c.ordersCount),
       c.totalSpent,
@@ -82,7 +108,7 @@ export function CustomersClient({ customers }: { customers: CustomerLite[] }) {
           { label: tr("customers.vip"), value: customers.filter((c) => c.isVip).length, color: "#f59e0b", icon: "⭐", mode: "num" },
           { label: tr("customers.revenue"), value: revenue, color: "#22c55e", icon: "💰" },
           { label: tr("customers.avgLtv"), value: revenue / Math.max(customers.length, 1), color: "#3b82f6", icon: "📊" },
-          { label: tr("customers.fromTelegram"), value: customers.filter((c) => c.source === "telegram" || c.source === "miniapp").length, color: "#0ea5e9", icon: "✈️", mode: "num" },
+          { label: "Согласие на маркетинг", value: customers.filter((c) => c.marketingConsent).length, color: "#0ea5e9", icon: "✉️", mode: "num" },
           { label: tr("customers.bonuses"), value: customers.reduce((a, c) => a + c.bonus, 0), color: "#ec4899", icon: "🎁" },
         ]}
       />
@@ -92,6 +118,11 @@ export function CustomersClient({ customers }: { customers: CustomerLite[] }) {
           value={src}
           onChange={setSrc}
           items={[{ key: "all", label: tr("common.all") }, { key: "vip", label: tr("customers.vip") }, ...Object.entries(SOURCE_LABEL).map(([k, v]) => ({ key: k, label: v }))]}
+        />
+        <Tabs
+          value={segment}
+          onChange={(key) => setSegment(key as CustomerSegment)}
+          items={(Object.keys(SEGMENT_LABELS) as CustomerSegment[]).map((key) => ({ key, label: SEGMENT_LABELS[key] }))}
         />
         <div className="relative flex-1 min-w-[220px]">
           <Search size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 muted" />
@@ -120,7 +151,9 @@ export function CustomersClient({ customers }: { customers: CustomerLite[] }) {
                     @{c.username} · ID {c.telegramId}
                   </div>
                 </div>
-                {c.isVip && <Badge color="#f59e0b">VIP</Badge>}
+                <Badge color={c.isVip ? "#f59e0b" : c.marketingConsent ? "#22c55e" : "#94a3b8"}>
+                  {customerSegment(c, referenceAt) === "vip" ? "VIP" : SEGMENT_LABELS[customerSegment(c, referenceAt)]}
+                </Badge>
               </div>
               <div className="grid grid-cols-2 gap-2 mt-4 text-xs">
                 <div className="rounded-2xl p-2.5" style={{ background: "rgba(var(--table-row))" }}>

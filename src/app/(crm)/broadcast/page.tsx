@@ -20,6 +20,7 @@ export default async function BroadcastPage() {
         source: c.source,
         isVip: c.isVip,
         bonus: c.bonus,
+        marketingConsent: c.marketingConsent,
         ordersCount: c.ordersCount,
         totalSpent: Number(c.totalSpent),
         lastActiveAt: String(c.lastActiveAt),

@@ -5,6 +5,7 @@ import Link from "next/link";
 import { Card, Badge, Avatar, Progress } from "@/shared/ui/kit";
 import { money, dt, statusMeta, SOURCE_LABEL, dateOnly } from "@/shared/lib/format";
 import { NoteSaver } from "./NoteSaver";
+import { CustomerConsent } from "./CustomerConsent";
 
 export const dynamic = "force-dynamic";
 
@@ -65,6 +66,9 @@ export default async function CustomerPage({ params }: { params: Promise<{ id: s
                 {t}
               </Badge>
             ))}
+          </div>
+          <div className="mt-4">
+            <CustomerConsent customerId={c.id} initialConsent={c.marketingConsent} />
           </div>
           <div className="flex gap-2 mt-5">
             <Link href={`/chat?customer=${c.id}`} className="btn btn-primary flex-1 justify-center">

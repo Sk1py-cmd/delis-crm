@@ -9,6 +9,7 @@ export default async function CustomersPage() {
   const rows = await getCustomers();
   return (
     <CustomersClient
+      referenceAt={new Date().toISOString()}
       customers={rows.map((c) => ({
         id: c.id,
         firstName: c.firstName,
@@ -20,6 +21,7 @@ export default async function CustomersPage() {
         source: c.source,
         isVip: c.isVip,
         bonus: c.bonus,
+        marketingConsent: c.marketingConsent,
         ordersCount: c.ordersCount,
         totalSpent: c.totalSpent,
         createdAt: String(c.createdAt),
