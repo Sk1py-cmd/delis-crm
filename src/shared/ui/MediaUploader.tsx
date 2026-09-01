@@ -116,6 +116,7 @@ export function MediaUploader({
                   style={{ width: 92, height: 92, border: `2px solid ${i === 0 ? "var(--primary)" : "rgba(var(--border))"}` }}>
 
                   {f.kind === "image" ? (
+                    // eslint-disable-next-line @next/next/no-img-element
                     <img src={f.url} alt={f.name} className="w-full h-full object-cover" />
                   ) : f.kind === "video" ? (
                     <div className="w-full h-full relative" style={{ background: "#000" }}>
@@ -162,9 +163,11 @@ export function MediaPreview({ file }: { file: MediaFile }) {
   if (file.kind === "image") {
     return (
       <>
+        {/* eslint-disable-next-line @next/next/no-img-element */}
         <img src={file.url} alt={file.name} className="rounded-2xl max-w-full cursor-pointer" style={{ maxHeight: 240 }} onClick={() => setOpen(true)} />
         {open && (
           <div className="fixed inset-0 z-[200] grid place-items-center p-6" style={{ background: "rgba(0,0,0,0.9)" }} onClick={() => setOpen(false)}>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
             <img src={file.url} alt={file.name} className="max-w-full max-h-full rounded-2xl" />
           </div>
         )}

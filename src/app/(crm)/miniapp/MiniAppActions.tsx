@@ -76,6 +76,7 @@ export function MiniAppActions() {
                 <div className="text-white/80 text-[0.7rem]">Химия для дома и авто</div>
               </div>
               {media[0] && (
+                // eslint-disable-next-line @next/next/no-img-element
                 <img src={media[0].url} alt="" className="w-full h-28 object-cover" />
               )}
               <div className="p-3 grid grid-cols-2 gap-2">

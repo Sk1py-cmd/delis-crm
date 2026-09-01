@@ -119,7 +119,7 @@ export function SecurityClient({
       );
       toast(result.revokedSessions !== undefined ? `${success}: ${result.revokedSessions}` : success);
       if (result.currentSessionRevoked) {
-        window.location.assign("/");
+        router.replace("/");
         return;
       }
       router.refresh();

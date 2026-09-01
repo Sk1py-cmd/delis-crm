@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
 import { ArrowLeft, Eye, EyeOff, Languages, Lock, LogIn, ShieldCheck, Sparkles, UserRound } from "lucide-react";
 import { useT } from "@/shared/i18n/useT";
@@ -20,6 +21,7 @@ export function LoginScreen() {
   const [langOpen, setLangOpen] = useState(false);
   const t = useT();
   const { locale, setLocale } = useLocale();
+  const router = useRouter();
 
   const submitPassword = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -49,7 +51,8 @@ export function LoginScreen() {
         return;
       }
       if (data.ok) {
-        window.location.assign("/");
+        router.refresh();
+        router.replace("/");
         return;
       }
       setError(data.error ?? t("login.errorEmpty"));
@@ -78,7 +81,8 @@ export function LoginScreen() {
       });
       const data = (await res.json()) as LoginResponse;
       if (data.ok) {
-        window.location.assign("/");
+        router.refresh();
+        router.replace("/");
         return;
       }
       setError(data.error ?? t("login.twoFactorPlaceholder"));

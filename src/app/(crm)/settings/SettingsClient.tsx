@@ -91,7 +91,7 @@ export function SettingsClient({ user, telegram }: { user: SettingsUser; telegra
   const logout = async () => {
     await fetch("/api/auth/logout", { method: "POST" });
     localStorage.removeItem("delis_token");
-    window.location.assign("/");
+    router.replace("/");
   };
 
   return (

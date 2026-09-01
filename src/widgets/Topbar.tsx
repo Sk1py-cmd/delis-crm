@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { AnimatePresence, motion } from "framer-motion";
 import { Search, Bell, Sun, Moon, MonitorSmartphone, Menu, X, Plus, Languages } from "lucide-react";
 import { useTheme } from "@/shared/store/theme";
@@ -23,6 +23,7 @@ export function Topbar({ user }: { user: { name: string; login: string; email: s
   const { mode, set } = useTheme();
   const { locale, setLocale } = useLocale();
   const pathname = usePathname();
+  const router = useRouter();
   const t = useT();
   useKeyboardShortcuts(user.role);
   const current = NAV.find((n) => n.href === pathname);
@@ -165,7 +166,7 @@ export function Topbar({ user }: { user: { name: string; login: string; email: s
                       style={{ color: "var(--error)" }}
                       onClick={async () => {
                         await fetch("/api/auth/logout", { method: "POST" });
-                        window.location.assign("/");
+                        router.replace("/");
                       }}
                     >
                       {t("topbar.logout")}
