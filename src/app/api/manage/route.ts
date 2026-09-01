@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { revalidatePath } from "next/cache";
 import { and, eq, sql } from "drizzle-orm";
 import { db } from "@/db";
 import * as s from "@/db/schema";
@@ -8,8 +9,11 @@ import { requireManageAction } from "@/server/apiAuth";
 import { recordAuditEvent } from "@/server/audit";
 import { requestIp } from "@/server/request";
 import { isStaffRole } from "@/shared/config/access";
+import { isSalesChannel } from "@/shared/config/channels";
 import { removeWorkforceArtifactsForDeletedUser } from "@/server/workforce";
-import { recordSyncEvent, syncEverything, recordBroadcast, createPromocode, toggleMarketingTrigger, createSupplier, createPurchaseOrder, receivePurchaseOrder, createReturn, approveReturn, addCourier, assignDelivery, completeDelivery, addAgentVisit, createAgentStoreOrder, sendAgentMessage, saveIntegration, testTelegramBot, sendTelegramMessage, saveArticle, deleteArticle, resetDemoData, publishSurface, saveSeoSettings, createInstagramPost, saveMiniAppBanners } from "@/server/queries";
+import { InventoryError } from "@/server/inventory";
+import { recordSyncEvent, syncEverything, recordBroadcast, createPromocode, toggleMarketingTrigger, createSupplier, createPurchaseOrder, receivePurchaseOrder, createReturn, approveReturn, addCourier, assignDelivery, completeDelivery, AgentStoreOrderError, createAgentStoreOrder, sendAgentMessage, saveIntegration, testTelegramBot, sendTelegramMessage, saveArticle, deleteArticle, resetDemoData, publishSurface, saveSeoSettings, createInstagramPost, saveMiniAppBanners, upsertProduct } from "@/server/queries";
+import { runSleepingCustomerAutomations } from "@/server/automation";
 
 export const dynamic = "force-dynamic";
 
@@ -247,17 +251,54 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ ok: true, id: a.id });
       }
       case "addTransaction": {
-        const [t] = await db
-          .insert(s.transactions)
-          .values({
-            kind: str(d.kind, "income") === "expense" ? "expense" : "income",
-            category: str(d.category, "sales"),
-            account: str(d.account, "click"),
-            amount: String(num(d.amount)),
-            note: str(d.note, "Операция из CRM"),
-          })
-          .returning();
-        await db.insert(s.activity).values({ actor: user.name, action: `провёл операцию «${t.kind === "income" ? "доход" : "расход"}»`, entity: t.note });
+        const kind = str(d.kind, "income") === "expense" ? "expense" : "income";
+        const category = str(d.category, "sales");
+        const account = str(d.account, "click");
+        const amount = num(d.amount);
+        if (!Number.isFinite(amount) || amount <= 0 || amount > 1_000_000_000) {
+          return NextResponse.json({ error: "Укажите сумму от 1 до 1 000 000 000" }, { status: 400 });
+        }
+        if (!["sales", "logistics", "marketing", "salary", "production", "rent"].includes(category)) {
+          return NextResponse.json({ error: "Некорректная категория операции" }, { status: 400 });
+        }
+        if (!["cash", "click", "payme", "uzum", "bank"].includes(account)) {
+          return NextResponse.json({ error: "Некорректный счёт операции" }, { status: 400 });
+        }
+        const channel = str(d.channel).trim().toLowerCase();
+        if (channel && !isSalesChannel(channel)) {
+          return NextResponse.json({ error: "Некорректный канал операции" }, { status: 400 });
+        }
+        const note = str(d.note, "Операция из CRM").trim().slice(0, 1_000) || "Операция из CRM";
+        const t = await db.transaction(async (tx) => {
+          const [created] = await tx
+            .insert(s.transactions)
+            .values({
+              kind,
+              category,
+              account,
+              amount: String(amount),
+              channel,
+              actorUserId: user.id,
+              actorName: user.name,
+              note,
+            })
+            .returning();
+          if (!created) throw new Error("Не удалось провести финансовую операцию");
+          await tx.insert(s.activity).values({
+            actorUserId: user.id,
+            actor: user.name,
+            action: "провёл финансовую операцию",
+            entity: `${kind === "income" ? "Доход" : "Расход"} · ${amount}`,
+            entityType: "transaction",
+            entityId: created.id,
+            eventType: "business",
+            severity: "info",
+            ip,
+            metadata: { kind, category, account, amount, channel },
+          });
+          return created;
+        });
+        revalidatePath("/finance");
         return NextResponse.json({ ok: true, id: t.id });
       }
       case "updateContent": {
@@ -270,6 +311,39 @@ export async function POST(req: NextRequest) {
       case "saveNote": {
         await db.update(s.customers).set({ notes: str(d.notes) }).where(eq(s.customers.id, num(d.id)));
         return NextResponse.json({ ok: true });
+      }
+      case "setCustomerMarketingConsent": {
+        const customerId = num(d.id);
+        if (!Number.isSafeInteger(customerId) || customerId <= 0 || typeof d.marketingConsent !== "boolean") {
+          return NextResponse.json({ error: "Некорректные данные согласия" }, { status: 400 });
+        }
+        const consent = d.marketingConsent;
+        const updated = await db.transaction(async (tx) => {
+          const [customer] = await tx
+            .update(s.customers)
+            .set({ marketingConsent: consent, marketingConsentAt: consent ? new Date() : null })
+            .where(eq(s.customers.id, customerId))
+            .returning({ id: s.customers.id });
+          if (!customer) return null;
+          await tx.insert(s.activity).values({
+            actorUserId: user.id,
+            actor: user.name,
+            action: consent ? "зафиксировал согласие на маркетинг" : "отозвал согласие на маркетинг",
+            entity: `Клиент #${customer.id}`,
+            entityType: "customer",
+            entityId: customer.id,
+            eventType: "business",
+            severity: consent ? "info" : "warning",
+            ip,
+            metadata: { marketingConsent: consent },
+          });
+          return customer;
+        });
+        if (!updated) return NextResponse.json({ error: "Клиент не найден" }, { status: 404 });
+        revalidatePath("/customers");
+        revalidatePath(`/customers/${customerId}`);
+        revalidatePath("/marketing");
+        return NextResponse.json({ ok: true, id: updated.id, marketingConsent: consent });
       }
       case "saveTemplate": {
         await db.insert(s.templates).values({ title: str(d.title, "Шаблон"), body: str(d.body) });
@@ -285,73 +359,73 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ ok: true });
       }
       case "sendBroadcast": {
-        const attachments = Array.isArray(d.attachments) ? (d.attachments as string[]) : [];
-        const media = Array.isArray(d.media) ? d.media : [];
-        const rawBody = str(d.body);
+        const rawBody = str(d.body).trim();
+        const title = str(d.title, "Рассылка").trim().slice(0, 120) || "Рассылка";
+        if (!rawBody || rawBody.length > 4_000) {
+          return NextResponse.json({ error: "Текст рассылки должен содержать от 1 до 4000 символов" }, { status: 400 });
+        }
+        const channel = str(d.channel, "telegram");
+        if (channel !== "telegram" && channel !== "miniapp" && channel !== "all") {
+          return NextResponse.json({ error: "Некорректный канал рассылки" }, { status: 400 });
+        }
+        const recipientIds = Array.isArray(d.recipientIds)
+          ? d.recipientIds.filter((value): value is number => typeof value === "number" && Number.isSafeInteger(value) && value > 0)
+          : [];
+        if (!recipientIds.length || recipientIds.length > 5_000) {
+          return NextResponse.json({ error: "Выберите от 1 до 5000 получателей" }, { status: 400 });
+        }
+        const attachments = Array.isArray(d.attachments)
+          ? d.attachments.filter((value): value is string => typeof value === "string").slice(0, 10).map((value) => value.slice(0, 160))
+          : [];
+        const rawMedia = Array.isArray(d.media) ? d.media.slice(0, 10) : [];
+        const media = rawMedia.map((value) => {
+          const item = value && typeof value === "object" ? value as Record<string, unknown> : {};
+          return { kind: str(item.kind, "file").slice(0, 24), name: str(item.name, "Файл").slice(0, 160) };
+        });
         const bodyForHistory = media.length > 0
           ? JSON.stringify({ text: rawBody, attachments, media })
           : rawBody;
-        const b = await recordBroadcast({
-          title: str(d.title, "Рассылка"),
+        const scheduledAt = d.scheduledAt ? new Date(str(d.scheduledAt)) : null;
+        if (scheduledAt && (Number.isNaN(scheduledAt.getTime()) || scheduledAt.getTime() <= Date.now())) {
+          return NextResponse.json({ error: "Укажите будущую дату отправки" }, { status: 400 });
+        }
+        const broadcast = await recordBroadcast({
+          title,
           body: bodyForHistory,
-          recipients: num(d.recipients),
-          channel: str(d.channel, "telegram"),
-          status: str(d.status, "sent"),
-          scheduledAt: d.scheduledAt ? new Date(String(d.scheduledAt)) : null,
-          createdBy: user.name,
+          recipientIds,
+          channel,
+          status: scheduledAt ? "scheduled" : "queued",
+          scheduledAt,
+          actor: { id: user.id, name: user.name, ip },
         });
-        await db.insert(s.activity).values({
-          actor: user.name,
-          action: `отправил рассылку ${num(d.recipients)} клиентам`,
-          entity: `${str(d.title, "Рассылка")} · ${attachments.length} вложений · ${media.length} файлов`,
-        });
-        await recordSyncEvent({
-          source: "crm",
-          target: str(d.channel, "telegram"),
-          entity: "broadcast",
-          action: "broadcast_sent",
-          payload: { recipients: num(d.recipients), attachments: attachments.length, media: media.length },
-        });
-        return NextResponse.json({ ok: true, id: b.id, attachments: attachments.length, media: media.length });
+        revalidatePath("/broadcast");
+        revalidatePath("/notifications");
+        return NextResponse.json({ ok: true, id: broadcast.id, recipients: broadcast.recipients, attachments: attachments.length, media: media.length });
       }
       case "importProducts": {
         const rows = Array.isArray(d.rows) ? (d.rows as { name?: string; price?: number; cost?: number; stock?: number; volume?: string }[]) : [];
         let count = 0;
-        for (const r of rows) {
-          const name = str(r.name).trim();
+        for (const row of rows.slice(0, 1_000)) {
+          const name = str(row.name).trim().slice(0, 200);
           if (!name) continue;
-          await db.insert(s.products).values({
+          await upsertProduct({
             name,
-            slug: name.toLowerCase().replace(/[^a-z0-9а-яё]+/gi, "-"),
             sku: `DLS-${Math.floor(Math.random() * 9000 + 1000)}`,
-            price: String(num(r.price)),
-            cost: String(num(r.cost)),
-            stock: num(r.stock),
-            volume: str(r.volume, "1 L"),
+            price: String(Math.max(0, num(row.price))),
+            cost: String(Math.max(0, num(row.cost))),
+            stock: Math.max(0, Math.floor(num(row.stock))),
+            volume: str(row.volume, "1 L").slice(0, 50),
             image: "🧴",
           });
-          count++;
+          count += 1;
         }
         await db.insert(s.activity).values({ actor: user.name, action: `импортировал ${count} товаров из CSV`, entity: "PIM" });
         return NextResponse.json({ ok: true, count });
       }
       case "inventory": {
-        const items = Array.isArray(d.items) ? (d.items as { productId?: number; fact?: number }[]) : [];
-        let count = 0;
-        for (const it of items) {
-          const pid = num(it.productId);
-          if (!pid) continue;
-          const [p] = await db.select().from(s.products).where(eq(s.products.id, pid));
-          if (!p) continue;
-          const fact = num(it.fact, p.stock);
-          const diff = fact - p.stock;
-          if (diff === 0) continue;
-          await db.update(s.products).set({ stock: fact }).where(eq(s.products.id, pid));
-          await db.insert(s.stockMoves).values({ productId: pid, kind: diff > 0 ? "in" : "writeoff", qty: Math.abs(diff), note: "Инвентаризация" });
-          count++;
-        }
-        await db.insert(s.activity).values({ actor: user.name, action: `провёл инвентаризацию (${count} корректировок)`, entity: "Склад №1" });
-        return NextResponse.json({ ok: true, count });
+        // The former aggregate endpoint cannot identify a warehouse and is kept
+        // only as an explicit migration response, never as an unsafe fallback.
+        return NextResponse.json({ error: "Инвентаризация перенесена в раздел «Склад»" }, { status: 410 });
       }
       case "sendOrderToClient": {
         const [order] = await db.select().from(s.orders).where(eq(s.orders.id, num(d.orderId)));
@@ -382,7 +456,16 @@ export async function POST(req: NextRequest) {
       }
       case "toggleMarketingTrigger": {
         const trig = await toggleMarketingTrigger(num(d.id), Boolean(d.isActive), user.name);
+        revalidatePath("/marketing");
         return NextResponse.json({ ok: true, id: trig?.id });
+      }
+      case "runCustomerAutomations": {
+        const result = await runSleepingCustomerAutomations({ id: user.id, name: user.name, ip });
+        revalidatePath("/marketing");
+        revalidatePath("/customers");
+        revalidatePath("/chat");
+        revalidatePath("/notifications");
+        return NextResponse.json({ ok: true, ...result });
       }
       case "createSupplier": {
         const name = str(d.name).trim();
@@ -409,20 +492,34 @@ export async function POST(req: NextRequest) {
           items: parsed,
           notes: str(d.notes),
           actor: user.name,
+          actorUserId: user.id,
+          warehouseId: num(d.warehouseId) || undefined,
         });
         return NextResponse.json({ ok: true, id: po.id, number: po.number });
       }
       case "receivePurchaseOrder": {
-        const res = await receivePurchaseOrder(num(d.id), user.name);
-        return NextResponse.json({ ok: true, items: res.items });
+        const res = await receivePurchaseOrder(num(d.id), user.name, user.id);
+        revalidatePath("/suppliers");
+        revalidatePath("/warehouse");
+        revalidatePath("/products");
+        revalidatePath("/finance");
+        return NextResponse.json({ ok: true, items: res.items, warehouseId: res.warehouseId });
       }
       case "createReturn": {
-        const ret = await createReturn({ orderId: num(d.orderId), reason: str(d.reason, "defect"), notes: str(d.notes), actor: user.name });
+        const ret = await createReturn({ orderId: num(d.orderId), reason: str(d.reason, "defect"), notes: str(d.notes), actor: user.name, actorUserId: user.id });
+        revalidatePath("/returns");
+        revalidatePath("/orders");
+        revalidatePath("/warehouse");
+        revalidatePath("/products");
         return NextResponse.json({ ok: true, id: ret.id });
       }
       case "approveReturn": {
-        await approveReturn(num(d.id), Boolean(d.restock), user.name);
-        return NextResponse.json({ ok: true });
+        const result = await approveReturn(num(d.id), Boolean(d.restock), user.name, user.id);
+        revalidatePath("/returns");
+        revalidatePath("/warehouse");
+        revalidatePath("/products");
+        revalidatePath("/finance");
+        return NextResponse.json({ ok: true, restocked: result.restocked });
       }
       case "addCourier": {
         const c = await addCourier({ name: str(d.name), phone: str(d.phone), vehicle: str(d.vehicle, "car"), zone: str(d.zone, "Tashkent"), actor: user.name });
@@ -433,29 +530,13 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ ok: true, id: del.id });
       }
       case "completeDelivery": {
-        await completeDelivery(num(d.id), user.name);
+        await completeDelivery(num(d.id), user.name, user.id);
+        revalidatePath("/delivery");
+        revalidatePath("/orders");
+        revalidatePath("/warehouse");
+        revalidatePath("/products");
+        revalidatePath("/finance");
         return NextResponse.json({ ok: true });
-      }
-      case "addAgentVisit": {
-        const agentId = num(d.agentId);
-        if (!Number.isSafeInteger(agentId) || agentId <= 0) return NextResponse.json({ error: "Выберите агента" }, { status: 400 });
-        if (user.role === "agent" && user.agentId !== agentId) {
-          return NextResponse.json({ error: "Нельзя добавлять визиты за другого агента" }, { status: 403 });
-        }
-        const storeName = str(d.storeName).trim();
-        if (!storeName) return NextResponse.json({ error: "Укажите название торговой точки" }, { status: 400 });
-        const visit = await addAgentVisit({
-          agentId,
-          storeName,
-          storeAddress: str(d.storeAddress),
-          gpsCoords: str(d.gpsCoords),
-          status: str(d.status, "order_placed"),
-          orderTotal: num(d.orderTotal, 0),
-          notes: str(d.notes),
-          photos: Array.isArray(d.photos) ? (d.photos as string[]) : [],
-          actor: user.name,
-        });
-        return NextResponse.json({ ok: true, id: visit.id });
       }
       case "sendAgentMessage": {
         const agentId = num(d.agentId);
@@ -638,6 +719,10 @@ export async function POST(req: NextRequest) {
         }
         const storeName = str(d.storeName).trim().slice(0, 200);
         if (!storeName) return NextResponse.json({ error: "Укажите название торговой точки" }, { status: 400 });
+        const clientMutationId = str(d.clientMutationId).trim();
+        if (clientMutationId && !/^[A-Za-z0-9][A-Za-z0-9_-]{15,127}$/.test(clientMutationId)) {
+          return NextResponse.json({ error: "Некорректный идентификатор офлайн-операции" }, { status: 400 });
+        }
         const items = Array.isArray(d.items) ? (d.items as { productId?: number; qty?: number }[]) : [];
         if (items.length === 0 || items.length > 100) return NextResponse.json({ error: "Добавьте от 1 до 100 товаров" }, { status: 400 });
         const parsed = items.map((i) => ({ productId: num(i.productId), qty: num(i.qty, 1) }));
@@ -651,13 +736,21 @@ export async function POST(req: NextRequest) {
           items: parsed,
           notes: str(d.notes),
           actor: user.name,
+          actorUserId: user.id,
+          syncKey: clientMutationId || null,
         });
+        revalidatePath("/orders");
+        revalidatePath("/warehouse");
+        revalidatePath("/products");
         return NextResponse.json({ ok: true, id: order.id, number: order.number });
       }
       default:
         return NextResponse.json({ error: `Неизвестное действие: ${body.action}` }, { status: 400 });
     }
   } catch (e) {
+    if (e instanceof AgentStoreOrderError || e instanceof InventoryError) {
+      return NextResponse.json({ error: e.message }, { status: e.status });
+    }
     const msg = e instanceof Error ? e.message : "Ошибка сервера";
     return NextResponse.json({ error: msg }, { status: 500 });
   }

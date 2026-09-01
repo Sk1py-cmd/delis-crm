@@ -10,12 +10,14 @@ import { useToast } from "@/shared/ui/Toast";
 import { postManage } from "@/shared/lib/manage";
 import { StatIcon } from "@/shared/ui/StatIcon";
 import { useT } from "@/shared/i18n/useT";
+import { SALES_CHANNEL_KEYS, SALES_CHANNEL_META, channelMeta } from "@/shared/config/channels";
 
 export interface Tx {
   id: number;
   kind: string;
   category: string;
   account: string;
+  channel: string;
   amount: string;
   note: string;
   createdAt: string;
@@ -47,7 +49,7 @@ export function FinanceClient({ tx, income, expense, byAccount, byCategory, byDa
   byDay: { day: string; income: number; expense: number }[];
 }) {
   const [add, setAdd] = useState(false);
-  const [form, setForm] = useState({ kind: "income", category: "sales", account: "click", amount: "", note: "" });
+  const [form, setForm] = useState({ kind: "income", category: "sales", account: "click", channel: "", amount: "", note: "" });
   const [busy, setBusy] = useState(false);
   const toast = useToast();
   const tr = useT();
@@ -60,7 +62,7 @@ export function FinanceClient({ tx, income, expense, byAccount, byCategory, byDa
       await postManage("addTransaction", { ...form, amount: Number(form.amount) });
       toast(`Операция на ${money(form.amount)} проведена`);
       setAdd(false);
-      setForm({ kind: "income", category: "sales", account: "click", amount: "", note: "" });
+      setForm({ kind: "income", category: "sales", account: "click", channel: "", amount: "", note: "" });
       router.refresh();
     } catch (e) {
       toast(e instanceof Error ? e.message : "Ошибка", "err");
@@ -70,8 +72,8 @@ export function FinanceClient({ tx, income, expense, byAccount, byCategory, byDa
 
   const exportCsv = () => {
     const rows = [
-      ["Дата", "Тип", "Категория", "Счёт", "Сумма", "Комментарий"],
-      ...tx.map((t) => [new Date(t.createdAt).toISOString(), t.kind, CATEGORY[t.category] ?? t.category, ACCOUNTS[t.account]?.label ?? t.account, t.amount, t.note]),
+      ["Дата", "Тип", "Категория", "Канал", "Счёт", "Сумма", "Комментарий"],
+      ...tx.map((t) => [new Date(t.createdAt).toISOString(), t.kind, CATEGORY[t.category] ?? t.category, channelMeta(t.channel).label, ACCOUNTS[t.account]?.label ?? t.account, t.amount, t.note]),
     ];
     const csv = rows.map((r) => r.join(";")).join("\n");
     const url = URL.createObjectURL(new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8" }));
@@ -97,7 +99,7 @@ export function FinanceClient({ tx, income, expense, byAccount, byCategory, byDa
   const cashBalance = cashIncome - cashExpense;
 
   const addCashOp = (kind: string, note: string) => {
-    setForm({ kind, category: kind === "income" ? "sales" : "logistics", account: "cash", amount: "", note });
+    setForm({ kind, category: kind === "income" ? "sales" : "logistics", account: "cash", channel: "", amount: "", note });
     setAdd(true);
   };
 
@@ -198,6 +200,7 @@ export function FinanceClient({ tx, income, expense, byAccount, byCategory, byDa
                 <tr>
                   <th>{tr("common.status")}</th>
                   <th>{tr("finance.account")}</th>
+                  <th className="hidden lg:table-cell">Канал</th>
                   <th>{tr("common.amount")}</th>
                   <th className="hidden md:table-cell">Комментарий</th>
                   <th>{tr("common.date")}</th>
@@ -211,6 +214,9 @@ export function FinanceClient({ tx, income, expense, byAccount, byCategory, byDa
                     </td>
                     <td>
                       <Badge color={ACCOUNTS[t.account]?.color ?? "#8b5cf6"}>{ACCOUNTS[t.account]?.label ?? t.account}</Badge>
+                    </td>
+                    <td className="hidden lg:table-cell">
+                      <Badge color={channelMeta(t.channel).color}>{channelMeta(t.channel).label}</Badge>
                     </td>
                     <td className="font-semibold whitespace-nowrap" style={{ color: t.kind === "income" ? "var(--success)" : "var(--error)" }}>
                       {t.kind === "income" ? "+" : "−"}
@@ -259,6 +265,15 @@ export function FinanceClient({ tx, income, expense, byAccount, byCategory, byDa
                 </option>
               ))}
             </select>
+            <label className="flex flex-col gap-1.5 text-sm">
+              <span className="muted">Канал продажи или рекламы</span>
+              <select className="input" value={form.channel} onChange={(e) => setForm({ ...form, channel: e.target.value })}>
+                <option value="">Не распределять по каналу</option>
+                {SALES_CHANNEL_KEYS.map((key) => (
+                  <option key={key} value={key}>{SALES_CHANNEL_META[key].label}</option>
+                ))}
+              </select>
+            </label>
             <input className="input" type="number" placeholder="Сумма (сум)" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} />
             <input className="input" placeholder="Комментарий" value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} />
             <button className="btn btn-primary justify-center" disabled={busy || !Number(form.amount)} onClick={create}>

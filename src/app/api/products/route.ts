@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { upsertProduct, deleteProduct, adjustStock, getProducts } from "@/server/queries";
+import { upsertProduct, deleteProduct, getProducts } from "@/server/queries";
 import { revalidatePath } from "next/cache";
 import { requireApiCapability } from "@/server/apiAuth";
 
@@ -74,8 +74,10 @@ export async function POST(req: NextRequest) {
   if (body.cost !== undefined && cost === undefined) return NextResponse.json({ error: "Некорректная себестоимость" }, { status: 400 });
   if (price !== undefined) payload.price = price;
   if (cost !== undefined) payload.cost = cost;
-  if (typeof body.stock === "number" && Number.isSafeInteger(body.stock) && body.stock >= 0) payload.stock = body.stock;
-  else if (body.stock !== undefined) return NextResponse.json({ error: "Некорректный остаток" }, { status: 400 });
+  if (typeof body.stock === "number" && Number.isSafeInteger(body.stock) && body.stock >= 0) {
+    if (id) return NextResponse.json({ error: "Остатки редактируются только через раздел «Склад»" }, { status: 409 });
+    payload.stock = body.stock;
+  } else if (body.stock !== undefined) return NextResponse.json({ error: "Некорректный остаток" }, { status: 400 });
   if (typeof body.volume === "string") payload.volume = body.volume.trim().slice(0, 50);
   if (typeof body.image === "string") payload.image = body.image.slice(0, 7_000_000);
   if (typeof body.description === "string") payload.description = body.description.trim().slice(0, 10_000);
@@ -87,10 +89,14 @@ export async function POST(req: NextRequest) {
   if (typeof body.status === "string" && ["active", "inactive", "draft"].includes(body.status)) payload.status = body.status;
   else if (body.status !== undefined) return NextResponse.json({ error: "Некорректный статус" }, { status: 400 });
 
-  const product = await upsertProduct(payload);
-  revalidatePath("/products");
-  revalidatePath("/warehouse");
-  return NextResponse.json({ product });
+  try {
+    const product = await upsertProduct(payload);
+    revalidatePath("/products");
+    revalidatePath("/warehouse");
+    return NextResponse.json({ product });
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : "Не удалось сохранить товар" }, { status: 400 });
+  }
 }
 
 export async function DELETE(req: NextRequest) {
@@ -99,30 +105,20 @@ export async function DELETE(req: NextRequest) {
 
   const id = Number(req.nextUrl.searchParams.get("id") ?? 0);
   if (!Number.isSafeInteger(id) || id <= 0) return NextResponse.json({ error: "id required" }, { status: 400 });
-  await deleteProduct(id);
-  revalidatePath("/products");
-  return NextResponse.json({ ok: true });
+  try {
+    await deleteProduct(id);
+    revalidatePath("/products");
+    revalidatePath("/warehouse");
+    return NextResponse.json({ ok: true, archived: true });
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : "Не удалось архивировать товар" }, { status: 400 });
+  }
 }
 
 export async function PUT(req: NextRequest) {
   const auth = await requireApiCapability(req, "products:manage", { write: true });
   if (!auth.ok) return auth.response;
-
-  let body: { productId?: unknown; kind?: unknown; qty?: unknown; note?: unknown };
-  try {
-    body = (await req.json()) as { productId?: unknown; kind?: unknown; qty?: unknown; note?: unknown };
-  } catch {
-    return NextResponse.json({ error: "invalid json" }, { status: 400 });
-  }
-
-  const productId = positiveId(body.productId);
-  const qty = typeof body.qty === "number" && Number.isSafeInteger(body.qty) && body.qty > 0 && body.qty <= 100_000 ? body.qty : null;
-  const kind = typeof body.kind === "string" && ["in", "out", "transfer", "writeoff"].includes(body.kind) ? body.kind : null;
-  if (!productId || !qty || !kind) return NextResponse.json({ error: "Некорректная корректировка склада" }, { status: 400 });
-
-  const note = typeof body.note === "string" ? body.note.trim().slice(0, 500) : "Корректировка склада";
-  await adjustStock(productId, kind, qty, note);
-  revalidatePath("/warehouse");
-  revalidatePath("/products");
-  return NextResponse.json({ ok: true });
+  // Stock is warehouse-scoped now. Do not let legacy aggregate requests create
+  // a mismatch between products.stock and warehouse_stocks.
+  return NextResponse.json({ error: "Складские корректировки перенесены в раздел «Склад»" }, { status: 410 });
 }

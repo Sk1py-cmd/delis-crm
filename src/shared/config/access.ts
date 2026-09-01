@@ -27,13 +27,13 @@ export const ROLE_ACCESS: Record<Role, readonly string[]> = {
   owner: ["*"],
   admin: [
     "/", "/company-os", "/analytics", "/pnl", "/knowledge", "/tasks", "/orders", "/products",
-    "/warehouse", "/suppliers", "/customers", "/agents", "/marketing", "/delivery", "/returns",
+    "/warehouse", "/suppliers", "/customers", "/agents", "/routes", "/marketing", "/delivery", "/returns",
     "/chat", "/broadcast", "/notifications", "/miniapp", "/website", "/instagram", "/finance",
     "/integrations", "/kpi", "/approvals", "/settings",
   ],
   manager: [
     "/", "/company-os", "/analytics", "/knowledge", "/tasks", "/orders", "/products", "/warehouse",
-    "/suppliers", "/delivery", "/returns", "/customers", "/agents", "/marketing", "/chat", "/broadcast",
+    "/suppliers", "/delivery", "/returns", "/customers", "/agents", "/routes", "/marketing", "/chat", "/broadcast",
     "/notifications", "/miniapp", "/website", "/instagram", "/kpi", "/approvals", "/settings",
   ],
   warehouse: ["/", "/tasks", "/knowledge", "/products", "/warehouse", "/suppliers", "/returns", "/delivery", "/kpi", "/approvals", "/settings"],
@@ -86,6 +86,8 @@ export type Capability =
   | "upload:write"
   | "workforce:read"
   | "fieldwork:write"
+  | "inventory:read"
+  | "inventory:manage"
   | "security:manage";
 
 const CAPABILITY_ACCESS: Record<Capability, readonly Role[]> = {
@@ -105,6 +107,8 @@ const CAPABILITY_ACCESS: Record<Capability, readonly Role[]> = {
   "workforce:read": ["admin", "manager", "warehouse", "agent", "support", "moderator", "operator"],
   // Agents submit only their own field reports; object-level agent/route checks live in server/fieldwork.ts.
   "fieldwork:write": ["admin", "manager", "agent"],
+  "inventory:read": ["admin", "manager", "warehouse"],
+  "inventory:manage": ["admin", "manager", "warehouse"],
   "security:manage": [],
 };
 
@@ -123,6 +127,7 @@ export const MANAGE_ACTIONS = [
   "addTransaction",
   "updateContent",
   "saveNote",
+  "setCustomerMarketingConsent",
   "saveTemplate",
   "notify",
   "syncEverything",
@@ -132,6 +137,7 @@ export const MANAGE_ACTIONS = [
   "sendOrderToClient",
   "createPromocode",
   "toggleMarketingTrigger",
+  "runCustomerAutomations",
   "createSupplier",
   "createPurchaseOrder",
   "receivePurchaseOrder",
@@ -140,7 +146,6 @@ export const MANAGE_ACTIONS = [
   "addCourier",
   "assignDelivery",
   "completeDelivery",
-  "addAgentVisit",
   "sendAgentMessage",
   "saveIntegration",
   "testTelegram",
@@ -172,6 +177,7 @@ const MANAGE_ACTION_ACCESS: Record<ManageAction, readonly StaffRole[]> = {
   addTransaction: ["admin"],
   updateContent: ["admin", "manager", "moderator"],
   saveNote: ["admin", "manager", "support", "operator"],
+  setCustomerMarketingConsent: ["admin", "manager", "support", "operator"],
   saveTemplate: ["admin", "manager", "support", "operator"],
   notify: ["admin", "manager"],
   syncEverything: ["admin", "manager"],
@@ -181,6 +187,7 @@ const MANAGE_ACTION_ACCESS: Record<ManageAction, readonly StaffRole[]> = {
   sendOrderToClient: ["admin", "manager", "support", "operator"],
   createPromocode: ["admin", "manager", "moderator"],
   toggleMarketingTrigger: ["admin", "manager", "moderator"],
+  runCustomerAutomations: [],
   createSupplier: ["admin", "manager", "warehouse"],
   createPurchaseOrder: ["admin", "manager", "warehouse"],
   receivePurchaseOrder: ["admin", "manager", "warehouse"],
@@ -189,7 +196,6 @@ const MANAGE_ACTION_ACCESS: Record<ManageAction, readonly StaffRole[]> = {
   addCourier: ["admin", "manager", "warehouse", "operator"],
   assignDelivery: ["admin", "manager", "warehouse", "operator"],
   completeDelivery: ["admin", "manager", "warehouse", "operator"],
-  addAgentVisit: ["admin", "manager", "agent"],
   sendAgentMessage: ["admin", "manager", "agent"],
   saveIntegration: ["admin"],
   testTelegram: ["admin"],

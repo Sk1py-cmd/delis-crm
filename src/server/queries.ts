@@ -1,7 +1,18 @@
 import { db } from "@/db";
 import * as s from "@/db/schema";
-import { ensureSeed } from "@/db/seed";
+import { bootstrapWarehouseStocks, ensureSeed } from "@/db/seed";
+import {
+  InventoryError,
+  type InventoryTx,
+  initializeProductInventory,
+  receiveReferencedInventory,
+  reserveOrderInventory,
+  resolveOrderInventoryReservations,
+  restockFulfilledOrderInventory,
+} from "@/server/inventory";
 import { desc, eq, sql, and, gte, inArray } from "drizzle-orm";
+import { runCustomerAutomationEvent, VIP_THRESHOLD } from "@/server/automation";
+import { channelMeta } from "@/shared/config/channels";
 
 export type Product = typeof s.products.$inferSelect;
 export type Order = typeof s.orders.$inferSelect;
@@ -326,80 +337,18 @@ export async function getAgents() {
   return db.select().from(s.agents).orderBy(desc(s.agents.fact));
 }
 
-export async function getAgentVisits(agentId?: number) {
-  await init();
-  return db
-    .select({
-      id: s.agentVisits.id,
-      agentId: s.agentVisits.agentId,
-      storeName: s.agentVisits.storeName,
-      storeAddress: s.agentVisits.storeAddress,
-      gpsCoords: s.agentVisits.gpsCoords,
-      status: s.agentVisits.status,
-      orderTotal: s.agentVisits.orderTotal,
-      notes: s.agentVisits.notes,
-      photos: s.agentVisits.photos,
-      visitedAt: s.agentVisits.visitedAt,
-      agentName: sql<string>`a.name`,
-    })
-    .from(s.agentVisits)
-    .leftJoin(sql`agents a`, sql`a.id = ${s.agentVisits.agentId}`)
-    .where(agentId ? eq(s.agentVisits.agentId, agentId) : sql`1=1`)
-    .orderBy(desc(s.agentVisits.visitedAt))
-    .limit(50);
+export class AgentStoreOrderError extends Error {
+  constructor(message: string, readonly status = 400) {
+    super(message);
+    this.name = "AgentStoreOrderError";
+  }
 }
 
-export async function addAgentVisit(input: {
-  agentId: number;
-  storeName: string;
-  storeAddress: string;
-  gpsCoords: string;
-  status: string;
-  orderTotal: number;
-  notes: string;
-  photos: string[];
-  actor: string;
-}) {
-  const [v] = await db
-    .insert(s.agentVisits)
-    .values({
-      agentId: input.agentId,
-      storeName: input.storeName.trim() || "Торговая точка B2B",
-      storeAddress: input.storeAddress,
-      gpsCoords: input.gpsCoords || "41.2858, 69.2035",
-      status: input.status || "order_placed",
-      orderTotal: String(input.orderTotal || 0),
-      notes: input.notes,
-      photos: input.photos || [],
-      visitedAt: new Date(),
-    })
-    .returning();
-
-  await db
-    .update(s.agents)
-    .set({
-      visits: sql`visits + 1`,
-      fact: input.orderTotal > 0 ? sql`fact + ${input.orderTotal}` : sql`fact`,
-    })
-    .where(eq(s.agents.id, input.agentId));
-
-  await db.insert(s.activity).values({
-    actor: input.actor,
-    action: "добавил фотоотчёт и визит торговой точки",
-    entity: `${input.storeName} (${input.orderTotal > 0 ? `заказ на ${input.orderTotal} сум` : "без заказа"})`,
-  });
-
-  await recordSyncEvent({
-    source: "crm",
-    target: "all",
-    entity: "agent_visit",
-    action: "visit_recorded",
-    payload: { agentId: input.agentId, storeName: input.storeName, orderTotal: input.orderTotal },
-  });
-
-  return v;
-}
-
+/**
+ * Creates a B2B order independently from a GPS visit. The database transaction
+ * makes an offline replay all-or-nothing: order rows, stock moves, agent fact and
+ * activity cannot be committed only partially.
+ */
 export async function createAgentStoreOrder(input: {
   agentId: number;
   storeName: string;
@@ -407,91 +356,110 @@ export async function createAgentStoreOrder(input: {
   items: { productId: number; qty: number }[];
   notes: string;
   actor: string;
+  actorUserId?: number | null;
+  syncKey?: string | null;
 }) {
-  const ids = input.items.map((i) => i.productId).filter(Boolean);
-  if (ids.length === 0) throw new Error("Добавьте хотя бы одну позицию");
+  await init();
+  const ids = input.items.map((item) => item.productId).filter(Boolean);
+  if (!ids.length) throw new AgentStoreOrderError("Добавьте хотя бы одну позицию");
 
-  const prods = await db
-    .select()
-    .from(s.products)
-    .where(inArray(s.products.id, [...new Set(ids)]));
-  const map = new Map(prods.map((p) => [p.id, p]));
+  const created = await db.transaction(async (tx) => {
+    if (input.syncKey) {
+      const [existing] = await tx.select().from(s.orders).where(eq(s.orders.syncKey, input.syncKey)).limit(1);
+      if (existing) {
+        if (existing.agentId !== input.agentId) throw new AgentStoreOrderError("Идентификатор офлайн-операции уже использован", 409);
+        return { order: existing, duplicate: true, total: Number(existing.total) };
+      }
+    }
 
-  let total = 0;
-  let costTotal = 0;
-  const rows: { productId: number; name: string; qty: number; price: string }[] = [];
-  for (const it of input.items) {
-    const p = map.get(it.productId);
-    if (!p) continue;
-    const qty = Math.max(1, it.qty);
-    total += Number(p.price) * qty;
-    costTotal += Number(p.cost) * qty;
-    rows.push({ productId: p.id, name: p.name, qty, price: p.price });
-  }
+    const prods = await tx
+      .select()
+      .from(s.products)
+      .where(inArray(s.products.id, [...new Set(ids)]));
+    const productsById = new Map(prods.map((product) => [product.id, product]));
+    if (productsById.size !== new Set(ids).size) {
+      throw new AgentStoreOrderError("Один или несколько товаров не найдены");
+    }
 
-  const [cnt] = await db.select({ c: sql<string>`count(*)` }).from(s.orders);
-  const orderNumber = `DLS-${24000 + Number(cnt.c) + 1}`;
+    let total = 0;
+    let costTotal = 0;
+    const rows: { productId: number; name: string; qty: number; price: string }[] = [];
+    for (const item of input.items) {
+      const product = productsById.get(item.productId);
+      // The set-size validation above ensures this is always present.
+      if (!product) continue;
+      const qty = Math.max(1, item.qty);
+      total += Number(product.price) * qty;
+      costTotal += Number(product.cost) * qty;
+      rows.push({ productId: product.id, name: product.name, qty, price: product.price });
+    }
 
-  const [order] = await db
-    .insert(s.orders)
-    .values({
-      number: orderNumber,
-      agentId: input.agentId,
-      status: "confirmed",
-      channel: "agent",
-      payment: "bank",
-      total: String(total),
-      profit: String(total - costTotal),
-      comment: `B2B Торговая точка: ${input.storeName} (${input.storeAddress})`,
-      timeline: [{ status: "confirmed", at: new Date().toISOString(), by: input.actor }],
-    })
-    .returning();
+    const [count] = await tx.select({ count: sql<string>`count(*)` }).from(s.orders);
+    const orderNumber = `DLS-${24000 + Number(count.count) + 1}`;
+    const [order] = await tx
+      .insert(s.orders)
+      .values({
+        number: orderNumber,
+        agentId: input.agentId,
+        status: "confirmed",
+        channel: "agent",
+        payment: "bank",
+        syncKey: input.syncKey ?? null,
+        total: String(total),
+        profit: String(total - costTotal),
+        comment: `B2B Торговая точка: ${input.storeName} (${input.storeAddress})`,
+        timeline: [{ status: "confirmed", at: new Date().toISOString(), by: input.actor }],
+      })
+      .onConflictDoNothing()
+      .returning();
 
-  if (rows.length > 0) {
-    await db.insert(s.orderItems).values(rows.map((r) => ({ ...r, orderId: order.id })));
-  }
+    if (!order) {
+      const [existing] = input.syncKey
+        ? await tx.select().from(s.orders).where(eq(s.orders.syncKey, input.syncKey)).limit(1)
+        : [];
+      if (existing?.agentId === input.agentId) return { order: existing, duplicate: true, total: Number(existing.total) };
+      if (existing) throw new AgentStoreOrderError("Идентификатор офлайн-операции уже использован", 409);
+      throw new AgentStoreOrderError("Не удалось сохранить заказ", 500);
+    }
 
-  for (const it of input.items) {
-    await adjustStock(it.productId, "out", Math.max(1, it.qty), `B2B заказ агента ${orderNumber}`);
-  }
-
-  await db
-    .insert(s.agentVisits)
-    .values({
-      agentId: input.agentId,
-      storeName: input.storeName.trim() || "Торговая точка B2B",
-      storeAddress: input.storeAddress,
-      gpsCoords: "41.2858, 69.2035",
-      status: "order_placed",
-      orderTotal: String(total),
-      notes: input.notes || `Оформлен заказ ${orderNumber} на сумму ${total} сум`,
-      photos: [],
-      visitedAt: new Date(),
+    await tx.insert(s.orderItems).values(rows.map((row) => ({ ...row, orderId: order.id })));
+    await reserveOrderInventory(tx, {
+      orderId: order.id,
+      items: rows.map(({ productId, qty }) => ({ productId, qty })),
+      actor: { id: input.actorUserId ?? null, name: input.actor },
+      reason: `B2B заказ агента ${orderNumber}`,
     });
 
-  await db
-    .update(s.agents)
-    .set({
-      visits: sql`visits + 1`,
-      fact: sql`fact + ${total}`,
-    })
-    .where(eq(s.agents.id, input.agentId));
+    // A sales order is not a GPS-verified field visit. A separate real-location
+    // check-in is required for visit counters and photo-report history.
+    await tx
+      .update(s.agents)
+      .set({ fact: sql`${s.agents.fact} + ${total}` })
+      .where(eq(s.agents.id, input.agentId));
+    await tx.insert(s.activity).values({
+      actorUserId: input.actorUserId ?? null,
+      actor: input.actor,
+      action: `оформил заказ от торговой точки «${input.storeName}»`,
+      entity: `${orderNumber} на сумму ${total} сум`,
+      entityType: "order",
+      entityId: order.id,
+      eventType: "business",
+      metadata: { agentId: input.agentId, positions: rows.length, total },
+    });
 
-  await db.insert(s.activity).values({
-    actor: input.actor,
-    action: `оформил заказ от торговой точки «${input.storeName}»`,
-    entity: `${orderNumber} на сумму ${total} сум`,
+    return { order, duplicate: false, total };
   });
 
-  await recordSyncEvent({
-    source: "crm",
-    target: "all",
-    entity: "agent_order",
-    action: "agent_order_created",
-    payload: { agentId: input.agentId, orderNumber, total },
-  });
-
-  return order;
+  if (!created.duplicate) {
+    await recordSyncEvent({
+      source: "crm",
+      target: "all",
+      entity: "agent_order",
+      action: "agent_order_created",
+      payload: { agentId: input.agentId, orderNumber: created.order.number, total: created.total },
+    });
+  }
+  return created.order;
 }
 
 export async function getWarehouse() {
@@ -602,6 +570,7 @@ export async function getBroadcastData() {
       source: s.customers.source,
       isVip: s.customers.isVip,
       bonus: s.customers.bonus,
+      marketingConsent: s.customers.marketingConsent,
       ordersCount: s.customers.ordersCount,
       totalSpent: s.customers.totalSpent,
       lastActiveAt: s.customers.lastActiveAt,
@@ -621,33 +590,63 @@ export type BroadcastCustomer = Awaited<ReturnType<typeof getBroadcastData>>["cu
 export async function recordBroadcast(data: {
   title: string;
   body: string;
-  recipients: number;
-  channel: string;
-  status?: string;
+  recipientIds: number[];
+  channel: "telegram" | "miniapp" | "all";
+  status?: "scheduled" | "queued";
   scheduledAt?: Date | null;
-  createdBy?: string;
+  actor: { id: number; name: string; ip: string };
 }) {
-  const [b] = await db
-    .insert(s.broadcasts)
-    .values({
-      title: data.title,
-      body: data.body,
-      recipients: data.recipients,
+  const recipientIds = [...new Set(data.recipientIds)].filter((id) => Number.isSafeInteger(id) && id > 0).slice(0, 5_000);
+  if (!recipientIds.length) throw new Error("Выберите хотя бы одного клиента с согласием на маркетинг");
+
+  return db.transaction(async (tx) => {
+    const recipients = await tx
+      .select({ id: s.customers.id })
+      .from(s.customers)
+      .where(and(inArray(s.customers.id, recipientIds), eq(s.customers.marketingConsent, true)));
+    if (!recipients.length) throw new Error("Ни один выбранный клиент не подтвердил согласие на маркетинг");
+
+    const [broadcast] = await tx
+      .insert(s.broadcasts)
+      .values({
+        title: data.title.slice(0, 120),
+        body: data.body.slice(0, 8_000),
+        recipients: recipients.length,
+        channel: data.channel,
+        status: data.status ?? "queued",
+        scheduledAt: data.scheduledAt ?? null,
+        createdBy: data.actor.name.slice(0, 160),
+        sentAt: new Date(),
+      })
+      .returning();
+    if (!broadcast) throw new Error("Не удалось создать рассылку");
+
+    await tx.insert(s.broadcastRecipients).values(recipients.map((recipient) => ({
+      broadcastId: broadcast.id,
+      customerId: recipient.id,
       channel: data.channel,
-      status: data.status ?? "sent",
-      scheduledAt: data.scheduledAt ?? null,
-      createdBy: data.createdBy ?? "",
-      sentAt: new Date(),
-    })
-    .returning();
-  await recordSyncEvent({
-    source: "crm",
-    target: data.channel === "all" ? "telegram_bot" : data.channel,
-    entity: "broadcast",
-    action: "broadcast_sent",
-    payload: { title: data.title, recipients: data.recipients },
+      status: data.status === "scheduled" ? "scheduled" : "queued",
+    })));
+    await tx.insert(s.activity).values({
+      actorUserId: data.actor.id,
+      actor: data.actor.name.slice(0, 120),
+      action: "создал рассылку с согласием клиентов",
+      entity: `${broadcast.title} · ${recipients.length} получателей`,
+      entityType: "broadcast",
+      entityId: broadcast.id,
+      eventType: "business",
+      ip: data.actor.ip.slice(0, 80),
+      metadata: { recipients: recipients.length, channel: data.channel, status: broadcast.status },
+    });
+    await tx.insert(s.syncEvents).values({
+      source: "crm",
+      target: data.channel === "all" ? "marketing" : data.channel,
+      entity: "broadcast",
+      action: data.status === "scheduled" ? "broadcast_scheduled" : "broadcast_queued",
+      payload: { broadcastId: broadcast.id, recipients: recipients.length },
+    });
+    return broadcast;
   });
-  return b;
 }
 
 /** Deliberately excludes credential hashes and all 2FA fields from user-list callers. */
@@ -709,15 +708,83 @@ export async function search(q: string) {
   ];
 }
 
-export async function setOrderStatus(id: number, status: string, by = "Отабек Delis") {
-  const [order] = await db.select().from(s.orders).where(eq(s.orders.id, id));
-  if (!order) return null;
-  const timeline = [...order.timeline, { status, at: new Date().toISOString(), by }];
-  const [updated] = await db.update(s.orders).set({ status, timeline }).where(eq(s.orders.id, id)).returning();
-  await db.insert(s.activity).values({ actor: by, action: `изменил статус на «${status}»`, entity: order.number });
-  await recordSyncEvent({ source: "crm", target: "telegram_bot", entity: "order", action: "order_status_changed", payload: { order: order.number, status } });
-  await recordSyncEvent({ source: "crm", target: "miniapp", entity: "order", action: "customer_order_updated", payload: { order: order.number, status } });
-  return updated;
+function settlementAccount(payment: string) {
+  return ["cash", "click", "payme", "uzum", "bank"].includes(payment) ? payment : "click";
+}
+
+/** Creates one finance income record for a fulfilled order, never a duplicate. */
+async function recordOrderRevenue(tx: InventoryTx, order: Order, actor: { id?: number | null; name: string }) {
+  const [existing] = await tx
+    .select({ id: s.transactions.id })
+    .from(s.transactions)
+    .where(and(
+      eq(s.transactions.referenceType, "order"),
+      eq(s.transactions.referenceId, order.id),
+      eq(s.transactions.kind, "income"),
+    ))
+    .limit(1);
+  if (existing) return false;
+  await tx.insert(s.transactions).values({
+    kind: "income",
+    category: "sales",
+    account: settlementAccount(order.payment),
+    amount: order.total,
+    referenceType: "order",
+    referenceId: order.id,
+    channel: order.channel,
+    actorUserId: actor.id ?? null,
+    actorName: actor.name.slice(0, 160),
+    note: `Выручка по заказу ${order.number}`,
+  });
+  return true;
+}
+
+export async function setOrderStatus(id: number, status: string, by = "Отабек Delis", actorUserId?: number | null) {
+  await init();
+  const result = await db.transaction(async (tx) => {
+    await tx.execute(sql`select ${s.orders.id} from ${s.orders} where ${s.orders.id} = ${id} for update`);
+    const [order] = await tx.select().from(s.orders).where(eq(s.orders.id, id)).limit(1);
+    if (!order) return null;
+    if (order.status === status) return { order, changed: false };
+
+    const timeline = [...order.timeline, { status, at: new Date().toISOString(), by }];
+    const [updated] = await tx.update(s.orders).set({ status, timeline }).where(eq(s.orders.id, id)).returning();
+    if (!updated) throw new Error("Не удалось обновить заказ");
+    if (status === "cancelled" || status === "returned") {
+      await resolveOrderInventoryReservations(tx, {
+        orderId: order.id,
+        resolution: "released",
+        actor: { id: actorUserId ?? null, name: by },
+        note: `Снятие резерва: заказ ${order.number} (${status})`,
+      });
+    } else if (status === "shipped" || status === "delivered") {
+      await resolveOrderInventoryReservations(tx, {
+        orderId: order.id,
+        resolution: "fulfilled",
+        actor: { id: actorUserId ?? null, name: by },
+        note: `Отгрузка заказа ${order.number}`,
+      });
+      await recordOrderRevenue(tx, updated, { id: actorUserId ?? null, name: by });
+    }
+    await tx.insert(s.activity).values({
+      actorUserId: actorUserId ?? null,
+      actor: by,
+      action: `изменил статус на «${status}»`,
+      entity: order.number,
+      entityType: "order",
+      entityId: order.id,
+      eventType: "business",
+      severity: status === "cancelled" || status === "returned" ? "warning" : "info",
+      metadata: { status },
+    });
+    return { order: updated, changed: true };
+  });
+  if (!result) return null;
+  if (result.changed) {
+    await recordSyncEvent({ source: "crm", target: "telegram_bot", entity: "order", action: "order_status_changed", payload: { order: result.order.number, status } });
+    await recordSyncEvent({ source: "crm", target: "miniapp", entity: "order", action: "customer_order_updated", payload: { order: result.order.number, status } });
+  }
+  return result.order;
 }
 
 export async function addMessage(customerId: number, body: string, fromAdmin = true, kind = "text") {
@@ -727,40 +794,58 @@ export async function addMessage(customerId: number, body: string, fromAdmin = t
 }
 
 export async function upsertProduct(data: Partial<Product> & { id?: number }) {
-  const { id, ...rest } = data;
+  await init();
+  const { id, stock: requestedStock, ...rest } = data;
   if (id) {
+    // Product data remains editable here, but an aggregate stock value is no
+    // longer a safe write once stock can live in multiple warehouses.
     const [p] = await db.update(s.products).set(rest).where(eq(s.products.id, id)).returning();
+    if (!p) throw new Error("Товар не найден");
     await recordSyncEvent({ source: "crm", target: "site", entity: "product", action: "product_updated", payload: { productId: id, sku: p.sku } });
     await recordSyncEvent({ source: "crm", target: "miniapp", entity: "product", action: "catalog_updated", payload: { productId: id, sku: p.sku } });
     return p;
   }
-  const [p] = await db
-    .insert(s.products)
-    .values({
-      name: rest.name ?? "Новый товар",
-      slug: (rest.name ?? "new-product").toLowerCase().replace(/[^a-z0-9]+/g, "-"),
-      sku: rest.sku ?? `DLS-${Math.floor(Math.random() * 9000 + 1000)}`,
-      ...rest,
-    })
-    .returning();
+
+  const p = await db.transaction(async (tx) => {
+    const [created] = await tx
+      .insert(s.products)
+      .values({
+        name: rest.name ?? "Новый товар",
+        slug: (rest.name ?? "new-product").toLowerCase().replace(/[^a-z0-9]+/g, "-"),
+        sku: rest.sku ?? `DLS-${Math.floor(Math.random() * 9000 + 1000)}`,
+        ...rest,
+        stock: typeof requestedStock === "number" && Number.isSafeInteger(requestedStock) && requestedStock >= 0 ? requestedStock : 0,
+      })
+      .returning();
+    if (!created) throw new Error("Не удалось создать товар");
+    await initializeProductInventory(tx, created.id);
+    return created;
+  });
   await recordSyncEvent({ source: "crm", target: "site", entity: "product", action: "product_created", payload: { productId: p.id, sku: p.sku } });
   await recordSyncEvent({ source: "crm", target: "miniapp", entity: "product", action: "catalog_updated", payload: { productId: p.id, sku: p.sku } });
   return p;
 }
 
+/** Ledger-backed goods cannot be physically deleted; hide them from active catalogues instead. */
 export async function deleteProduct(id: number) {
-  await db.delete(s.products).where(eq(s.products.id, id));
+  await init();
+  const [product] = await db
+    .update(s.products)
+    .set({ status: "inactive" })
+    .where(eq(s.products.id, id))
+    .returning();
+  if (!product) throw new Error("Товар не найден");
+  await recordSyncEvent({ source: "crm", target: "site", entity: "product", action: "product_archived", payload: { productId: id, sku: product.sku } });
+  await recordSyncEvent({ source: "crm", target: "miniapp", entity: "product", action: "catalog_updated", payload: { productId: id, sku: product.sku } });
+  return product;
 }
 
-export async function adjustStock(productId: number, kind: string, qty: number, note: string) {
-  const delta = kind === "in" ? qty : -qty;
-  await db
-    .update(s.products)
-    .set({ stock: sql`greatest(0, stock + ${delta})` })
-    .where(eq(s.products.id, productId));
-  await db.insert(s.stockMoves).values({ productId, kind, qty, note });
-  await recordSyncEvent({ source: "warehouse", target: "crm", entity: "stock", action: "stock_changed", payload: { productId, kind, qty } });
-  await recordSyncEvent({ source: "crm", target: "miniapp", entity: "stock", action: "availability_updated", payload: { productId } });
+/**
+ * Legacy callers must migrate to the inventory API. Keeping an explicit error
+ * here is safer than silently mutating products.stock without warehouse data.
+ */
+export async function adjustStock(_productId: number, _kind: string, _qty: number, _note: string): Promise<never> {
+  throw new InventoryError("Используйте складские операции с выбранным складом");
 }
 
 export async function createOrderQuick(
@@ -769,55 +854,84 @@ export async function createOrderQuick(
   qty: number,
   payment = "click",
   actor = "CRM",
+  actorUserId?: number | null,
 ) {
-  const [[customer], [p]] = await Promise.all([
-    db.select().from(s.customers).where(eq(s.customers.id, customerId)).limit(1),
-    db.select().from(s.products).where(eq(s.products.id, productId)).limit(1),
-  ]);
-  if (!customer) throw new Error("Клиент не найден");
-  if (!p) throw new Error("Товар не найден");
+  await init();
+  if (!Number.isSafeInteger(customerId) || customerId < 1) throw new Error("Клиент не найден");
+  if (!Number.isSafeInteger(productId) || productId < 1) throw new Error("Товар не найден");
   if (!Number.isSafeInteger(qty) || qty < 1) throw new Error("Некорректное количество");
-  if (p.stock < qty) throw new Error(`Недостаточно товара на складе: доступно ${p.stock} шт.`);
 
-  const total = Number(p.price) * qty;
-  const [count] = await db.select({ c: sql<string>`count(*)` }).from(s.orders);
-  const [order] = await db
-    .insert(s.orders)
-    .values({
-      number: `DLS-${24000 + Number(count.c) + 1}`,
-      customerId,
-      status: "new",
-      channel: "crm",
-      payment,
-      total: String(total),
-      profit: String(total - Number(p.cost) * qty),
-      timeline: [{ status: "new", at: new Date().toISOString(), by: actor }],
-    })
-    .returning();
+  const created = await db.transaction(async (tx) => {
+    const [customer] = await tx.select().from(s.customers).where(eq(s.customers.id, customerId)).limit(1);
+    const [product] = await tx.select().from(s.products).where(eq(s.products.id, productId)).limit(1);
+    const [count] = await tx.select({ c: sql<string>`count(*)` }).from(s.orders);
+    if (!customer) throw new Error("Клиент не найден");
+    if (!product) throw new Error("Товар не найден");
 
-  await db.insert(s.orderItems).values({ orderId: order.id, productId, name: p.name, qty, price: p.price });
-  await adjustStock(productId, "out", qty, `Заказ ${order.number}`);
-  await db.update(s.products).set({ sold: sql`sold + ${qty}` }).where(eq(s.products.id, productId));
-  await db
-    .update(s.customers)
-    .set({
-      ordersCount: sql`orders_count + 1`,
-      totalSpent: sql`total_spent + ${total}`,
-      lastActiveAt: new Date(),
-    })
-    .where(eq(s.customers.id, customerId));
-  await recordSyncEvent({ source: "crm", target: "telegram_bot", entity: "order", action: "order_created", payload: { order: order.number, customerId } });
-  await recordSyncEvent({ source: "crm", target: "finance", entity: "order", action: "revenue_planned", payload: { order: order.number, total } });
+    const total = Number(product.price) * qty;
+    const [order] = await tx
+      .insert(s.orders)
+      .values({
+        number: `DLS-${24000 + Number(count.c) + 1}`,
+        customerId,
+        status: "new",
+        channel: "crm",
+        payment,
+        total: String(total),
+        profit: String(total - Number(product.cost) * qty),
+        timeline: [{ status: "new", at: new Date().toISOString(), by: actor }],
+      })
+      .returning();
+    if (!order) throw new Error("Не удалось создать заказ");
 
-  await notifyOwnerAboutOrder(order.number, String(total), payment, p.name);
-  return order;
+    await tx.insert(s.orderItems).values({ orderId: order.id, productId, name: product.name, qty, price: product.price });
+    await reserveOrderInventory(tx, {
+      orderId: order.id,
+      items: [{ productId, qty }],
+      actor: { id: actorUserId ?? null, name: actor },
+      reason: `Резерв под заказ ${order.number}`,
+    });
+    await tx.update(s.products).set({ sold: sql`${s.products.sold} + ${qty}` }).where(eq(s.products.id, productId));
+    await tx
+      .update(s.customers)
+      .set({
+        ordersCount: sql`${s.customers.ordersCount} + 1`,
+        totalSpent: sql`${s.customers.totalSpent} + ${total}`,
+        lastActiveAt: new Date(),
+      })
+      .where(eq(s.customers.id, customerId));
+    await tx.insert(s.activity).values({
+      actorUserId: actorUserId ?? null,
+      actor,
+      action: "создал заказ и резерв",
+      entity: order.number,
+      entityType: "order",
+      entityId: order.id,
+      eventType: "business",
+      metadata: { positions: 1, total },
+    });
+    if (!customer.isVip && Number(customer.totalSpent) + total >= VIP_THRESHOLD) {
+      await runCustomerAutomationEvent(tx, customer, "vip_threshold");
+    }
+    await tx.insert(s.syncEvents).values([
+      { source: "crm", target: "telegram_bot", entity: "order", action: "order_created", payload: { order: order.number, customerId } },
+      { source: "crm", target: "finance", entity: "order", action: "revenue_planned", payload: { order: order.number, total } },
+    ]);
+    return { order, productName: product.name };
+  });
+
+  await notifyOwnerAboutOrder(created.order.number, String(created.order.total), payment, created.productName);
+  return created.order;
 }
 
 export async function createMultiOrder(
   customerId: number,
   items: { productId: number; qty: number }[],
   actor = "CRM",
+  actorUserId?: number | null,
 ) {
+  await init();
+  if (!Number.isSafeInteger(customerId) || customerId < 1) throw new Error("Клиент не найден");
   if (items.length === 0) throw new Error("Добавьте хотя бы одну позицию");
   for (const item of items) {
     if (!Number.isSafeInteger(item.productId) || item.productId < 1 || !Number.isSafeInteger(item.qty) || item.qty < 1) {
@@ -825,65 +939,78 @@ export async function createMultiOrder(
     }
   }
 
-  const productIds = [...new Set(items.map((item) => item.productId))];
-  const [[customer], prods] = await Promise.all([
-    db.select().from(s.customers).where(eq(s.customers.id, customerId)).limit(1),
-    db.select().from(s.products).where(inArray(s.products.id, productIds)),
-  ]);
-  if (!customer) throw new Error("Клиент не найден");
-  if (prods.length !== productIds.length) throw new Error("Один или несколько товаров не найдены");
+  return db.transaction(async (tx) => {
+    const productIds = [...new Set(items.map((item) => item.productId))];
+    const [customer] = await tx.select().from(s.customers).where(eq(s.customers.id, customerId)).limit(1);
+    const products = await tx.select().from(s.products).where(inArray(s.products.id, productIds));
+    const [count] = await tx.select({ c: sql<string>`count(*)` }).from(s.orders);
+    if (!customer) throw new Error("Клиент не найден");
+    if (products.length !== productIds.length) throw new Error("Один или несколько товаров не найдены");
 
-  const prodMap = new Map(prods.map((p) => [p.id, p]));
-  const qtyByProduct = new Map<number, number>();
-  for (const item of items) qtyByProduct.set(item.productId, (qtyByProduct.get(item.productId) ?? 0) + item.qty);
-  for (const [productId, orderedQty] of qtyByProduct) {
-    const product = prodMap.get(productId)!;
-    if (product.stock < orderedQty) {
-      throw new Error(`Недостаточно товара «${product.name}»: доступно ${product.stock} шт.`);
+    const productsById = new Map(products.map((product) => [product.id, product]));
+    const qtyByProduct = new Map<number, number>();
+    let total = 0;
+    let costTotal = 0;
+    const orderItems: { productId: number; name: string; qty: number; price: string }[] = [];
+    for (const item of items) {
+      const product = productsById.get(item.productId)!;
+      total += Number(product.price) * item.qty;
+      costTotal += Number(product.cost) * item.qty;
+      orderItems.push({ productId: product.id, name: product.name, qty: item.qty, price: product.price });
+      qtyByProduct.set(product.id, (qtyByProduct.get(product.id) ?? 0) + item.qty);
     }
-  }
 
-  let total = 0;
-  let costTotal = 0;
-  const orderItems: { productId: number; name: string; qty: number; price: string }[] = [];
-  for (const item of items) {
-    const product = prodMap.get(item.productId)!;
-    total += Number(product.price) * item.qty;
-    costTotal += Number(product.cost) * item.qty;
-    orderItems.push({ productId: product.id, name: product.name, qty: item.qty, price: product.price });
-  }
+    const [order] = await tx
+      .insert(s.orders)
+      .values({
+        number: `DLS-${24000 + Number(count.c) + 1}`,
+        customerId,
+        status: "new",
+        channel: "crm",
+        total: String(total),
+        profit: String(total - costTotal),
+        timeline: [{ status: "new", at: new Date().toISOString(), by: actor }],
+      })
+      .returning();
+    if (!order) throw new Error("Не удалось создать заказ");
 
-  const [count] = await db.select({ c: sql<string>`count(*)` }).from(s.orders);
-  const [order] = await db
-    .insert(s.orders)
-    .values({
-      number: `DLS-${24000 + Number(count.c) + 1}`,
-      customerId,
-      status: "new",
-      channel: "crm",
-      total: String(total),
-      profit: String(total - costTotal),
-      timeline: [{ status: "new", at: new Date().toISOString(), by: actor }],
-    })
-    .returning();
-
-  await db.insert(s.orderItems).values(orderItems.map((item) => ({ ...item, orderId: order.id })));
-  for (const [productId, orderedQty] of qtyByProduct) {
-    await adjustStock(productId, "out", orderedQty, `Заказ ${order.number}`);
-    await db.update(s.products).set({ sold: sql`sold + ${orderedQty}` }).where(eq(s.products.id, productId));
-  }
-  await db
-    .update(s.customers)
-    .set({
-      ordersCount: sql`orders_count + 1`,
-      totalSpent: sql`total_spent + ${total}`,
-      lastActiveAt: new Date(),
-    })
-    .where(eq(s.customers.id, customerId));
-
-  await recordSyncEvent({ source: "crm", target: "telegram_bot", entity: "order", action: "order_created", payload: { order: order.number, customerId, items: items.length } });
-  await recordSyncEvent({ source: "crm", target: "finance", entity: "order", action: "revenue_planned", payload: { order: order.number, total } });
-  return order;
+    await tx.insert(s.orderItems).values(orderItems.map((item) => ({ ...item, orderId: order.id })));
+    await reserveOrderInventory(tx, {
+      orderId: order.id,
+      items: [...qtyByProduct].map(([productId, qty]) => ({ productId, qty })),
+      actor: { id: actorUserId ?? null, name: actor },
+      reason: `Резерв под заказ ${order.number}`,
+    });
+    for (const [productId, orderedQty] of qtyByProduct) {
+      await tx.update(s.products).set({ sold: sql`${s.products.sold} + ${orderedQty}` }).where(eq(s.products.id, productId));
+    }
+    await tx
+      .update(s.customers)
+      .set({
+        ordersCount: sql`${s.customers.ordersCount} + 1`,
+        totalSpent: sql`${s.customers.totalSpent} + ${total}`,
+        lastActiveAt: new Date(),
+      })
+      .where(eq(s.customers.id, customerId));
+    await tx.insert(s.activity).values({
+      actorUserId: actorUserId ?? null,
+      actor,
+      action: "создал заказ и резерв",
+      entity: order.number,
+      entityType: "order",
+      entityId: order.id,
+      eventType: "business",
+      metadata: { positions: items.length, total },
+    });
+    if (!customer.isVip && Number(customer.totalSpent) + total >= VIP_THRESHOLD) {
+      await runCustomerAutomationEvent(tx, customer, "vip_threshold");
+    }
+    await tx.insert(s.syncEvents).values([
+      { source: "crm", target: "telegram_bot", entity: "order", action: "order_created", payload: { order: order.number, customerId, items: items.length } },
+      { source: "crm", target: "finance", entity: "order", action: "revenue_planned", payload: { order: order.number, total } },
+    ]);
+    return order;
+  });
 }
 
 export async function markThreadRead(customerId: number) {
@@ -913,37 +1040,129 @@ export async function getReturnsData() {
   return rows;
 }
 
-export async function createReturn(input: { orderId: number; reason: string; notes: string; actor: string }) {
-  const [order] = await db.select().from(s.orders).where(eq(s.orders.id, input.orderId));
-  if (!order) throw new Error("Заказ не найден");
-  const [ret] = await db.insert(s.returns).values({
-    orderId: input.orderId,
-    customerId: order.customerId,
-    reason: input.reason,
-    refundAmount: order.total,
-    notes: input.notes,
-    createdBy: input.actor,
-  }).returning();
-  await db.update(s.orders).set({ status: "returned" }).where(eq(s.orders.id, input.orderId));
-  await db.insert(s.activity).values({ actor: input.actor, action: "оформил возврат", entity: order.number });
-  await recordSyncEvent({ source: "crm", target: "finance", entity: "return", action: "return_created", payload: { order: order.number } });
-  return ret;
+export async function createReturn(input: { orderId: number; reason: string; notes: string; actor: string; actorUserId?: number | null }) {
+  await init();
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`select ${s.orders.id} from ${s.orders} where ${s.orders.id} = ${input.orderId} for update`);
+    const [order] = await tx.select().from(s.orders).where(eq(s.orders.id, input.orderId)).limit(1);
+    if (!order) throw new Error("Заказ не найден");
+    if (order.status === "cancelled") throw new Error("Нельзя оформить возврат для отменённого заказа");
+    const [existingReturn] = await tx
+      .select({ id: s.returns.id })
+      .from(s.returns)
+      .where(eq(s.returns.orderId, input.orderId))
+      .limit(1);
+    if (existingReturn) throw new Error("Возврат по этому заказу уже оформлен");
+
+    const [ret] = await tx
+      .insert(s.returns)
+      .values({
+        orderId: input.orderId,
+        customerId: order.customerId,
+        reason: input.reason,
+        refundAmount: order.total,
+        notes: input.notes,
+        createdBy: input.actor,
+      })
+      .returning();
+    if (!ret) throw new Error("Не удалось оформить возврат");
+
+    const timeline = [...order.timeline, { status: "returned", at: new Date().toISOString(), by: input.actor }];
+    await tx.update(s.orders).set({ status: "returned", timeline }).where(eq(s.orders.id, input.orderId));
+    await resolveOrderInventoryReservations(tx, {
+      orderId: order.id,
+      resolution: "released",
+      actor: { id: input.actorUserId ?? null, name: input.actor },
+      note: `Снятие резерва: возврат ${order.number}`,
+    });
+    await tx.insert(s.activity).values({
+      actorUserId: input.actorUserId ?? null,
+      actor: input.actor,
+      action: "оформил возврат",
+      entity: order.number,
+      entityType: "return",
+      entityId: ret.id,
+      eventType: "business",
+      severity: "warning",
+      metadata: { orderId: order.id },
+    });
+    await tx.insert(s.syncEvents).values({
+      source: "crm",
+      target: "finance",
+      entity: "return",
+      action: "return_created",
+      payload: { order: order.number },
+    });
+    return ret;
+  });
 }
 
-export async function approveReturn(id: number, restock: boolean, actor: string) {
-  const [ret] = await db.select().from(s.returns).where(eq(s.returns.id, id));
-  if (!ret) throw new Error("Возврат не найден");
-  await db.update(s.returns).set({ status: "refunded", restockItems: restock }).where(eq(s.returns.id, id));
-  if (restock) {
-    const items = await db.select().from(s.orderItems).where(eq(s.orderItems.orderId, ret.orderId));
-    for (const it of items) {
-      await db.update(s.products).set({ stock: sql`stock + ${it.qty}` }).where(eq(s.products.id, it.productId));
-      await db.insert(s.stockMoves).values({ productId: it.productId, kind: "in", qty: it.qty, note: `Возврат заказа` });
+export async function approveReturn(id: number, restock: boolean, actor: string, actorUserId?: number | null) {
+  await init();
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`select ${s.returns.id} from ${s.returns} where ${s.returns.id} = ${id} for update`);
+    const [ret] = await tx.select().from(s.returns).where(eq(s.returns.id, id)).limit(1);
+    if (!ret) throw new Error("Возврат не найден");
+    if (ret.status === "refunded") throw new Error("Этот возврат уже обработан");
+
+    const [order] = await tx.select().from(s.orders).where(eq(s.orders.id, ret.orderId)).limit(1);
+    if (!order) throw new Error("Заказ возврата не найден");
+    const items = await tx.select().from(s.orderItems).where(eq(s.orderItems.orderId, ret.orderId));
+    await tx.update(s.returns).set({ status: "refunded", restockItems: restock }).where(eq(s.returns.id, id));
+
+    let restocked = 0;
+    if (restock) {
+      const [reservation] = await tx
+        .select({ id: s.stockReservations.id })
+        .from(s.stockReservations)
+        .where(eq(s.stockReservations.orderId, ret.orderId))
+        .limit(1);
+      if (reservation) {
+        const result = await restockFulfilledOrderInventory(tx, {
+          orderId: ret.orderId,
+          returnId: ret.id,
+          actor: { id: actorUserId ?? null, name: actor },
+          note: `Возврат заказа ${order.number}`,
+        });
+        restocked = result.restocked;
+      } else if (items.length) {
+        // Orders created before multi-warehouse accounting had no reservation.
+        const result = await receiveReferencedInventory(tx, {
+          items: items.map((item) => ({ productId: item.productId, qty: item.qty })),
+          actor: { id: actorUserId ?? null, name: actor },
+          referenceType: "return",
+          referenceId: ret.id,
+          note: `Возврат архивного заказа ${order.number}`,
+        });
+        restocked = result.items;
+      }
     }
-  }
-  await db.insert(s.transactions).values({ kind: "expense", category: "logistics", account: "click", amount: ret.refundAmount, note: `Возврат по заказу #${ret.orderId}` });
-  await db.insert(s.activity).values({ actor, action: `одобрил возврат${restock ? " с возвратом на склад" : ""}`, entity: `#${ret.orderId}` });
-  return { ok: true };
+
+    await tx.insert(s.transactions).values({
+      kind: "expense",
+      category: "logistics",
+      account: "click",
+      amount: ret.refundAmount,
+      referenceType: "return",
+      referenceId: ret.id,
+      channel: order.channel,
+      actorUserId: actorUserId ?? null,
+      actorName: actor.slice(0, 160),
+      note: `Возврат по заказу #${ret.orderId}`,
+    });
+    await tx.insert(s.activity).values({
+      actorUserId: actorUserId ?? null,
+      actor,
+      action: `одобрил возврат${restock ? " с возвратом на склад" : ""}`,
+      entity: `#${ret.orderId}`,
+      entityType: "return",
+      entityId: ret.id,
+      eventType: "business",
+      severity: "warning",
+      metadata: { orderId: ret.orderId, restock, restocked },
+    });
+    return { ok: true, restocked };
+  });
 }
 
 // ── Delivery ──
@@ -990,16 +1209,50 @@ export async function assignDelivery(input: { orderId: number; courierId: number
   return d;
 }
 
-export async function completeDelivery(id: number, actor: string) {
-  const [d] = await db.select().from(s.deliveries).where(eq(s.deliveries.id, id));
-  if (!d) throw new Error("Доставка не найдена");
-  await db.update(s.deliveries).set({ status: "delivered", deliveredAt: new Date() }).where(eq(s.deliveries.id, id));
-  if (d.courierId) {
-    await db.update(s.couriers).set({ activeDeliveries: sql`greatest(0, active_deliveries - 1)`, completedToday: sql`completed_today + 1`, status: "available" }).where(eq(s.couriers.id, d.courierId));
-  }
-  await db.update(s.orders).set({ status: "delivered" }).where(eq(s.orders.id, d.orderId));
-  await db.insert(s.activity).values({ actor, action: "подтвердил доставку", entity: `Заказ #${d.orderId}` });
-  return { ok: true };
+export async function completeDelivery(id: number, actor: string, actorUserId?: number | null) {
+  await init();
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`select ${s.deliveries.id} from ${s.deliveries} where ${s.deliveries.id} = ${id} for update`);
+    const [delivery] = await tx.select().from(s.deliveries).where(eq(s.deliveries.id, id)).limit(1);
+    if (!delivery) throw new Error("Доставка не найдена");
+    if (delivery.status === "delivered") return { ok: true, alreadyDelivered: true };
+
+    await tx.update(s.deliveries).set({ status: "delivered", deliveredAt: new Date() }).where(eq(s.deliveries.id, id));
+    if (delivery.courierId) {
+      await tx
+        .update(s.couriers)
+        .set({
+          activeDeliveries: sql`greatest(0, ${s.couriers.activeDeliveries} - 1)`,
+          completedToday: sql`${s.couriers.completedToday} + 1`,
+          status: "available",
+        })
+        .where(eq(s.couriers.id, delivery.courierId));
+    }
+    await tx.execute(sql`select ${s.orders.id} from ${s.orders} where ${s.orders.id} = ${delivery.orderId} for update`);
+    const [order] = await tx.select().from(s.orders).where(eq(s.orders.id, delivery.orderId)).limit(1);
+    if (order && order.status !== "delivered") {
+      const timeline = [...order.timeline, { status: "delivered", at: new Date().toISOString(), by: actor }];
+      await tx.update(s.orders).set({ status: "delivered", timeline }).where(eq(s.orders.id, order.id));
+      await resolveOrderInventoryReservations(tx, {
+        orderId: order.id,
+        resolution: "fulfilled",
+        actor: { id: actorUserId ?? null, name: actor },
+        note: `Отгрузка по доставке заказа ${order.number}`,
+      });
+      await recordOrderRevenue(tx, order, { id: actorUserId ?? null, name: actor });
+    }
+    await tx.insert(s.activity).values({
+      actorUserId: actorUserId ?? null,
+      actor,
+      action: "подтвердил доставку",
+      entity: `Заказ #${delivery.orderId}`,
+      entityType: "delivery",
+      entityId: delivery.id,
+      eventType: "business",
+      metadata: { orderId: delivery.orderId },
+    });
+    return { ok: true, alreadyDelivered: false };
+  });
 }
 
 export async function getProcurementData() {
@@ -1011,6 +1264,7 @@ export async function getProcurementData() {
         id: s.purchaseOrders.id,
         number: s.purchaseOrders.number,
         supplierId: s.purchaseOrders.supplierId,
+        warehouseId: s.purchaseOrders.warehouseId,
         status: s.purchaseOrders.status,
         total: s.purchaseOrders.total,
         paid: s.purchaseOrders.paid,
@@ -1019,9 +1273,11 @@ export async function getProcurementData() {
         notes: s.purchaseOrders.notes,
         createdAt: s.purchaseOrders.createdAt,
         supplierName: sql<string>`sup.name`,
+        warehouseName: s.warehouses.name,
       })
       .from(s.purchaseOrders)
       .leftJoin(sql`suppliers sup`, sql`sup.id = ${s.purchaseOrders.supplierId}`)
+      .leftJoin(s.warehouses, eq(s.purchaseOrders.warehouseId, s.warehouses.id))
       .orderBy(desc(s.purchaseOrders.createdAt))
       .limit(40),
   ]);
@@ -1075,122 +1331,164 @@ export async function createPurchaseOrder(input: {
   items: { productId: number; qty: number }[];
   notes: string;
   actor: string;
+  actorUserId?: number | null;
+  warehouseId?: number | null;
 }) {
-  const ids = input.items.map((i) => i.productId).filter(Boolean);
-  if (ids.length === 0) throw new Error("Добавьте хотя бы одну позицию");
-
-  const prods = await db
-    .select()
-    .from(s.products)
-    .where(inArray(s.products.id, [...new Set(ids)]));
-  const map = new Map(prods.map((p) => [p.id, p]));
-
-  let total = 0;
-  const rows: { productId: number; name: string; qty: number; price: string }[] = [];
-  for (const it of input.items) {
-    const p = map.get(it.productId);
-    if (!p) continue;
-    const qty = Math.max(1, it.qty);
-    total += Number(p.cost) * qty;
-    rows.push({ productId: p.id, name: p.name, qty, price: p.cost });
+  await init();
+  if (!Number.isSafeInteger(input.supplierId) || input.supplierId < 1) throw new Error("Поставщик не найден");
+  if (input.warehouseId !== undefined && input.warehouseId !== null && (!Number.isSafeInteger(input.warehouseId) || input.warehouseId < 1)) {
+    throw new InventoryError("Некорректный склад для закупки");
+  }
+  if (!input.items.length || input.items.length > 1_000) throw new Error("Добавьте от 1 до 1000 позиций");
+  for (const item of input.items) {
+    if (!Number.isSafeInteger(item.productId) || item.productId < 1 || !Number.isSafeInteger(item.qty) || item.qty < 1 || item.qty > 100_000) {
+      throw new Error("Некорректные позиции закупки");
+    }
   }
 
-  const [sup] = await db.select().from(s.suppliers).where(eq(s.suppliers.id, input.supplierId));
-  const [cnt] = await db.select({ c: sql<string>`count(*)` }).from(s.purchaseOrders);
+  return db.transaction(async (tx) => {
+    const productIds = [...new Set(input.items.map((item) => item.productId))];
+    const [supplier] = await tx.select().from(s.suppliers).where(eq(s.suppliers.id, input.supplierId)).limit(1);
+    const products = await tx.select().from(s.products).where(inArray(s.products.id, productIds));
+    const [targetWarehouse] = input.warehouseId
+      ? await tx.select().from(s.warehouses).where(and(eq(s.warehouses.id, input.warehouseId), eq(s.warehouses.status, "active"))).limit(1)
+      : [];
+    const [count] = await tx.select({ c: sql<string>`count(*)` }).from(s.purchaseOrders);
+    if (!supplier) throw new Error("Поставщик не найден");
+    if (products.length !== productIds.length) throw new Error("Один или несколько товаров не найдены");
+    if (input.warehouseId && !targetWarehouse) throw new InventoryError("Склад для закупки не найден или неактивен", 404);
 
-  const [po] = await db
-    .insert(s.purchaseOrders)
-    .values({
-      number: `PO-${1200 + Number(cnt.c) + 1}`,
-      supplierId: input.supplierId,
-      status: "sent",
-      total: String(total),
-      expectedAt: new Date(Date.now() + (sup?.leadTimeDays ?? 7) * 86400000),
-      notes: input.notes,
-      createdBy: input.actor,
-    })
-    .returning();
-
-  if (rows.length > 0) {
-    await db.insert(s.purchaseItems).values(rows.map((r) => ({ ...r, purchaseOrderId: po.id })));
-  }
-
-  await db.insert(s.activity).values({
-    actor: input.actor,
-    action: `создал закупку у «${sup?.name ?? "поставщика"}»`,
-    entity: `${po.number} · ${rows.length} позиций`,
+    const productsById = new Map(products.map((product) => [product.id, product]));
+    let total = 0;
+    const rows: { productId: number; name: string; qty: number; price: string }[] = [];
+    for (const item of input.items) {
+      const product = productsById.get(item.productId)!;
+      total += Number(product.cost) * item.qty;
+      rows.push({ productId: product.id, name: product.name, qty: item.qty, price: product.cost });
+    }
+    const [po] = await tx
+      .insert(s.purchaseOrders)
+      .values({
+        number: `PO-${1200 + Number(count.c) + 1}`,
+        supplierId: input.supplierId,
+        warehouseId: targetWarehouse?.id ?? null,
+        status: "sent",
+        total: String(total),
+        expectedAt: new Date(Date.now() + supplier.leadTimeDays * 86400000),
+        notes: input.notes.slice(0, 2_000),
+        createdBy: input.actor.slice(0, 160),
+      })
+      .returning();
+    if (!po) throw new Error("Не удалось создать закупку");
+    await tx.insert(s.purchaseItems).values(rows.map((row) => ({ ...row, purchaseOrderId: po.id })));
+    await tx.insert(s.activity).values({
+      actorUserId: input.actorUserId ?? null,
+      actor: input.actor,
+      action: `создал закупку у «${supplier.name}»`,
+      entity: `${po.number} · ${rows.length} позиций`,
+      entityType: "purchase_order",
+      entityId: po.id,
+      eventType: "business",
+      metadata: { supplierId: supplier.id, warehouseId: targetWarehouse?.id ?? null, positions: rows.length, total },
+    });
+    await tx.insert(s.syncEvents).values({
+      source: "crm",
+      target: "warehouse",
+      entity: "purchase_order",
+      action: "purchase_created",
+      payload: {
+        number: po.number,
+        total,
+        ...(targetWarehouse ? { warehouseId: targetWarehouse.id } : {}),
+      },
+    });
+    return po;
   });
-  await recordSyncEvent({
-    source: "crm",
-    target: "warehouse",
-    entity: "purchase_order",
-    action: "purchase_created",
-    payload: { number: po.number, total },
-  });
-
-  return po;
 }
 
-export async function receivePurchaseOrder(id: number, actor: string) {
-  const [po] = await db.select().from(s.purchaseOrders).where(eq(s.purchaseOrders.id, id));
-  if (!po) throw new Error("Закупка не найдена");
-  if (po.status === "received") throw new Error("Эта партия уже принята на склад");
+export async function receivePurchaseOrder(id: number, actor: string, actorUserId?: number | null) {
+  await init();
+  return db.transaction(async (tx) => {
+    // The document lock makes a repeated click or concurrent request idempotent.
+    await tx.execute(sql`select ${s.purchaseOrders.id} from ${s.purchaseOrders} where ${s.purchaseOrders.id} = ${id} for update`);
+    const [po] = await tx.select().from(s.purchaseOrders).where(eq(s.purchaseOrders.id, id)).limit(1);
+    if (!po) throw new Error("Закупка не найдена");
+    if (po.status === "received") throw new Error("Эта партия уже принята на склад");
+    if (po.status === "cancelled") throw new Error("Нельзя принять отменённую закупку");
+    const items = await tx.select().from(s.purchaseItems).where(eq(s.purchaseItems.purchaseOrderId, id));
+    if (!items.length) throw new Error("В закупке нет позиций для приёмки");
 
-  const items = await db.select().from(s.purchaseItems).where(eq(s.purchaseItems.purchaseOrderId, id));
-
-  for (const it of items) {
-    await db
-      .update(s.products)
-      .set({ stock: sql`stock + ${it.qty}` })
-      .where(eq(s.products.id, it.productId));
-    await db.insert(s.stockMoves).values({
-      productId: it.productId,
-      kind: "in",
-      qty: it.qty,
+    const received = await receiveReferencedInventory(tx, {
+      items: items.map((item) => ({ productId: item.productId, qty: item.qty })),
+      actor: { id: actorUserId ?? null, name: actor },
+      referenceType: "purchase_order",
+      referenceId: po.id,
+      warehouseId: po.warehouseId ?? undefined,
       note: `Приход по закупке ${po.number}`,
     });
-  }
-
-  await db
-    .update(s.purchaseOrders)
-    .set({ status: "received", receivedAt: new Date(), paid: po.total })
-    .where(eq(s.purchaseOrders.id, id));
-
-  await db
-    .update(s.suppliers)
-    .set({ totalPurchased: sql`total_purchased + ${po.total}` })
-    .where(eq(s.suppliers.id, po.supplierId));
-
-  await db.insert(s.transactions).values({
-    kind: "expense",
-    category: "production",
-    account: "bank",
-    amount: po.total,
-    note: `Оплата закупки ${po.number}`,
+    await tx
+      .update(s.purchaseOrders)
+      .set({ status: "received", receivedAt: new Date(), paid: po.total })
+      .where(eq(s.purchaseOrders.id, id));
+    await tx
+      .update(s.suppliers)
+      .set({ totalPurchased: sql`${s.suppliers.totalPurchased} + ${po.total}` })
+      .where(eq(s.suppliers.id, po.supplierId));
+    await tx.insert(s.transactions).values({
+      kind: "expense",
+      category: "production",
+      account: "bank",
+      amount: po.total,
+      referenceType: "purchase_order",
+      referenceId: po.id,
+      actorUserId: actorUserId ?? null,
+      actorName: actor.slice(0, 160),
+      note: `Оплата закупки ${po.number}`,
+    });
+    await tx.insert(s.activity).values({
+      actorUserId: actorUserId ?? null,
+      actor,
+      action: "принял партию на склад",
+      entity: `${po.number} · ${items.length} позиций`,
+      entityType: "purchase_order",
+      entityId: po.id,
+      eventType: "business",
+      metadata: { warehouseId: received.warehouseId, positions: received.items, total: Number(po.total) },
+    });
+    await tx.insert(s.syncEvents).values({
+      source: "warehouse",
+      target: "crm",
+      entity: "purchase_order",
+      action: "purchase_received",
+      payload: { number: po.number, items: received.items, warehouseId: received.warehouseId },
+    });
+    return { ok: true, items: received.items, warehouseId: received.warehouseId };
   });
-
-  await db.insert(s.activity).values({
-    actor,
-    action: `принял партию на склад`,
-    entity: `${po.number} · ${items.length} позиций`,
-  });
-  await recordSyncEvent({
-    source: "warehouse",
-    target: "crm",
-    entity: "purchase_order",
-    action: "purchase_received",
-    payload: { number: po.number, items: items.length },
-  });
-
-  return { ok: true, items: items.length };
 }
 
 export async function getMarketingData() {
   await init();
-  const [promos, triggers, campaigns] = await Promise.all([
+  const [promos, triggers, campaigns, recentRuns] = await Promise.all([
     db.select().from(s.promocodes).orderBy(desc(s.promocodes.createdAt)),
     db.select().from(s.marketingTriggers).orderBy(s.marketingTriggers.id),
     db.select().from(s.campaigns).orderBy(desc(s.campaigns.createdAt)).limit(8),
+    db
+      .select({
+        id: s.automationRuns.id,
+        eventKey: s.automationRuns.eventKey,
+        actionType: s.automationRuns.actionType,
+        status: s.automationRuns.status,
+        createdAt: s.automationRuns.createdAt,
+        triggerTitle: s.marketingTriggers.title,
+        customerFirstName: s.customers.firstName,
+        customerLastName: s.customers.lastName,
+        customerSource: s.customers.source,
+      })
+      .from(s.automationRuns)
+      .innerJoin(s.marketingTriggers, eq(s.automationRuns.triggerId, s.marketingTriggers.id))
+      .innerJoin(s.customers, eq(s.automationRuns.customerId, s.customers.id))
+      .orderBy(desc(s.automationRuns.createdAt))
+      .limit(12),
   ]);
 
   const [ordersAgg] = await db
@@ -1198,21 +1496,67 @@ export async function getMarketingData() {
       totalSales: sql<string>`coalesce(sum(total),0)`,
       ordersCount: sql<string>`count(*)`,
     })
-    .from(s.orders);
+    .from(s.orders)
+    .where(sql`${s.orders.status} not in ('cancelled', 'returned')`);
 
-  // Канали привлечения и расходы
-  const adChannels = [
-    { name: "Telegram Bot / Ads", spent: 18400000, revenue: 84200000, leads: 1240, orders: 380, roi: 358, color: "#0ea5e9" },
-    { name: "Telegram Mini App", spent: 8200000, revenue: 56100000, leads: 910, orders: 290, roi: 584, color: "#8b5cf6" },
-    { name: "Instagram Ads / Reels", spent: 24600000, revenue: 78900000, leads: 2180, orders: 310, roi: 221, color: "#ec4899" },
-    { name: "Агенты и B2B рекомендации", spent: 12000000, revenue: 95400000, leads: 320, orders: 180, roi: 695, color: "#22c55e" },
-    { name: "Официальный сайт SEO/Direct", spent: 4800000, revenue: 32000000, leads: 480, orders: 110, roi: 567, color: "#f59e0b" },
-  ];
+  // Attribution is derived from real orders, customer sources, and finance entries.
+  // Marketing expenses without a selected channel are deliberately shown as unallocated.
+  const [ordersByChannel, leadsByChannel, spendByChannel] = await Promise.all([
+    db
+      .select({
+        channel: s.orders.channel,
+        revenue: sql<string>`coalesce(sum(${s.orders.total}), 0)`,
+        profit: sql<string>`coalesce(sum(${s.orders.profit}), 0)`,
+        orders: sql<string>`count(*)`,
+      })
+      .from(s.orders)
+      .where(sql`${s.orders.status} not in ('cancelled', 'returned')`)
+      .groupBy(s.orders.channel),
+    db
+      .select({ channel: s.customers.source, leads: sql<string>`count(*)` })
+      .from(s.customers)
+      .groupBy(s.customers.source),
+    db
+      .select({ channel: s.transactions.channel, spent: sql<string>`coalesce(sum(${s.transactions.amount}), 0)` })
+      .from(s.transactions)
+      .where(and(eq(s.transactions.kind, "expense"), eq(s.transactions.category, "marketing")))
+      .groupBy(s.transactions.channel),
+  ]);
+  const channelKeys = new Set<string>([
+    ...ordersByChannel.map((row) => row.channel),
+    ...leadsByChannel.map((row) => row.channel),
+    ...spendByChannel.map((row) => row.channel),
+  ]);
+  const ordersByKey = new Map(ordersByChannel.map((row) => [row.channel, row]));
+  const leadsByKey = new Map(leadsByChannel.map((row) => [row.channel, Number(row.leads)]));
+  const spendByKey = new Map(spendByChannel.map((row) => [row.channel, Number(row.spent)]));
+  const adChannels = [...channelKeys]
+    .map((channel) => {
+      const order = ordersByKey.get(channel);
+      const revenue = Number(order?.revenue ?? 0);
+      const spent = spendByKey.get(channel) ?? 0;
+      const leads = leadsByKey.get(channel) ?? 0;
+      const meta = channelMeta(channel);
+      return {
+        key: channel,
+        name: meta.label,
+        color: meta.color,
+        revenue,
+        profit: Number(order?.profit ?? 0),
+        spent,
+        leads,
+        orders: Number(order?.orders ?? 0),
+        conversion: leads > 0 ? (Number(order?.orders ?? 0) / leads) * 100 : null,
+        roi: spent > 0 ? ((revenue - spent) / spent) * 100 : null,
+      };
+    })
+    .sort((a, b) => b.revenue - a.revenue || b.spent - a.spent);
 
   return {
     promos,
     triggers,
     campaigns,
+    recentRuns,
     adChannels,
     totalSales: Number(ordersAgg.totalSales),
     ordersCount: Number(ordersAgg.ordersCount),
@@ -1509,11 +1853,13 @@ export async function getPnLReport() {
 // ═══ СБРОС ДЕМО-ДАННЫХ ═══
 export async function resetDemoData(actor: string, keepSettings = true) {
   await db.execute(sql`
-    truncate table order_items, orders, messages, agent_messages, agent_visits,
+    truncate table order_items, orders, messages, agent_messages, agent_route_stops, agent_routes, agent_visits,
+      warehouse_stocks, stock_reservations, inventory_count_lines, inventory_counts,
       stock_moves, purchase_items, purchase_orders, returns, deliveries,
-      transactions, campaigns, broadcasts, sync_events, activity, tasks
+      transactions, campaigns, broadcasts, broadcast_recipients, automation_runs, sync_events, activity, tasks
     restart identity cascade
   `);
+  await bootstrapWarehouseStocks();
   await db.execute(sql`update customers set orders_count = 0, total_spent = 0`);
   await db.execute(sql`update agents set fact = 0, visits = 0`);
   await db.execute(sql`update products set sold = 0`);

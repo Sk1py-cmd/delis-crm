@@ -23,13 +23,18 @@ export function ProductActions({ id }: { id: number }) {
         className="btn"
         style={{ color: "var(--error)" }}
         onClick={async () => {
-          if (!confirm("Удалить товар?")) return;
-          await fetch(`/api/products?id=${id}`, { method: "DELETE" });
-          toast("Товар удалён");
+          if (!confirm("Архивировать товар? История движений и документов будет сохранена.")) return;
+          const response = await fetch(`/api/products?id=${id}`, { method: "DELETE" });
+          const result = await response.json().catch(() => ({})) as { error?: string };
+          if (!response.ok) {
+            toast(result.error ?? "Не удалось архивировать товар", "err");
+            return;
+          }
+          toast("Товар перенесён в архив; история движений сохранена");
           router.push("/products");
         }}
       >
-        <Trash2 size={14} /> Удалить
+        <Trash2 size={14} /> В архив
       </button>
     </div>
   );

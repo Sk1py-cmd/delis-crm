@@ -9,13 +9,41 @@ const DDL = `
 create table if not exists categories (id serial primary key, name text not null, slug text not null, kind text not null default 'home', icon text not null default '🧴', created_at timestamp not null default now());
 create table if not exists products (id serial primary key, name text not null, slug text not null, sku text not null, barcode text not null default '', category_id integer, description text not null default '', brand text not null default 'DELIS', country text not null default 'Uzbekistan', volume text not null default '1 L', weight numeric not null default 1, price numeric not null default 0, cost numeric not null default 0, vat integer not null default 12, discount integer not null default 0, stock integer not null default 0, low_stock integer not null default 20, image text not null default '', images jsonb not null default '[]'::jsonb, color text not null default '#8b5cf6', is_popular boolean not null default false, is_new boolean not null default false, is_featured boolean not null default false, status text not null default 'active', sold integer not null default 0, created_at timestamp not null default now());
 create table if not exists customers (id serial primary key, first_name text not null, last_name text not null default '', username text not null default '', telegram_id text not null default '', phone text not null default '', email text not null default '', city text not null default 'Tashkent', region text not null default 'Toshkent', address text not null default '', language text not null default 'ru', source text not null default 'telegram', is_vip boolean not null default false, bonus integer not null default 0, tags jsonb not null default '[]'::jsonb, notes text not null default '', orders_count integer not null default 0, total_spent numeric not null default 0, last_active_at timestamp not null default now(), created_at timestamp not null default now());
-create table if not exists orders (id serial primary key, number text not null, customer_id integer, agent_id integer, status text not null default 'new', channel text not null default 'miniapp', payment text not null default 'click', total numeric not null default 0, profit numeric not null default 0, comment text not null default '', timeline jsonb not null default '[]'::jsonb, created_at timestamp not null default now());
+create table if not exists orders (id serial primary key, number text not null, customer_id integer, agent_id integer, status text not null default 'new', channel text not null default 'miniapp', payment text not null default 'click', sync_key text, total numeric not null default 0, profit numeric not null default 0, comment text not null default '', timeline jsonb not null default '[]'::jsonb, created_at timestamp not null default now());
 create table if not exists order_items (id serial primary key, order_id integer not null, product_id integer not null, name text not null, qty integer not null default 1, price numeric not null default 0);
 create table if not exists agents (id serial primary key, name text not null, phone text not null default '', telegram text not null default '', email text not null default '', region text not null default 'Toshkent', route text not null default '', plan numeric not null default 0, fact numeric not null default 0, commission integer not null default 7, visits integer not null default 0, status text not null default 'active', avatar_color text not null default '#8b5cf6');
-create table if not exists transactions (id serial primary key, kind text not null, category text not null default 'sales', account text not null default 'click', amount numeric not null default 0, note text not null default '', created_at timestamp not null default now());
+create table if not exists transactions (id serial primary key, kind text not null, category text not null default 'sales', account text not null default 'click', amount numeric not null default 0, reference_type text not null default '', reference_id integer, actor_user_id integer, actor_name text not null default '', note text not null default '', created_at timestamp not null default now());
 create table if not exists messages (id serial primary key, customer_id integer not null, body text not null, from_admin boolean not null default false, kind text not null default 'text', read_at timestamp, created_at timestamp not null default now());
 create table if not exists templates (id serial primary key, title text not null, body text not null);
 create table if not exists stock_moves (id serial primary key, product_id integer not null, kind text not null, qty integer not null default 0, note text not null default '', created_at timestamp not null default now());
+create table if not exists warehouses (id serial primary key, code text not null unique, name text not null, city text not null default '', address text not null default '', is_default boolean not null default false, status text not null default 'active', created_at timestamp not null default now(), updated_at timestamp not null default now());
+create table if not exists warehouse_stocks (id serial primary key, warehouse_id integer not null, product_id integer not null, on_hand integer not null default 0, reserved integer not null default 0, updated_at timestamp not null default now());
+create table if not exists inventory_migrations (key text primary key, applied_at timestamp not null default now());
+create table if not exists stock_reservations (id serial primary key, order_id integer, warehouse_id integer not null, product_id integer not null, qty integer not null, status text not null default 'active', reason text not null default '', expires_at timestamp, released_at timestamp, created_by_user_id integer, created_by_name text not null default '', created_at timestamp not null default now());
+create table if not exists inventory_counts (id serial primary key, warehouse_id integer not null, number text not null, title text not null default '', status text not null default 'draft', notes text not null default '', started_by_user_id integer, started_by_name text not null default '', posted_by_user_id integer, posted_by_name text not null default '', started_at timestamp, posted_at timestamp, created_at timestamp not null default now(), updated_at timestamp not null default now());
+create table if not exists inventory_count_lines (id serial primary key, inventory_count_id integer not null, product_id integer not null, system_qty integer not null default 0, counted_qty integer, difference integer, note text not null default '', counted_by_user_id integer, counted_at timestamp, updated_at timestamp not null default now());
+alter table stock_moves add column if not exists warehouse_id integer;
+alter table stock_moves add column if not exists balance_after integer;
+alter table stock_moves add column if not exists reference_type text not null default '';
+alter table stock_moves add column if not exists reference_id integer;
+alter table stock_moves add column if not exists actor_user_id integer;
+alter table stock_moves add column if not exists actor_name text not null default '';
+alter table transactions add column if not exists reference_type text not null default '';
+alter table transactions add column if not exists reference_id integer;
+alter table transactions add column if not exists actor_user_id integer;
+alter table transactions add column if not exists actor_name text not null default '';
+alter table transactions add column if not exists channel text not null default '';
+create index if not exists transactions_channel_created_at_idx on transactions (channel, created_at desc);
+create unique index if not exists transactions_order_income_unique on transactions (reference_type, reference_id, kind) where reference_type = 'order' and kind = 'income';
+create unique index if not exists warehouses_one_default_unique on warehouses ((is_default)) where is_default;
+create unique index if not exists warehouse_stocks_warehouse_product_unique on warehouse_stocks (warehouse_id, product_id);
+create index if not exists warehouse_stocks_product_idx on warehouse_stocks (product_id);
+create index if not exists stock_reservations_order_status_idx on stock_reservations (order_id, status);
+create index if not exists stock_reservations_warehouse_product_status_idx on stock_reservations (warehouse_id, product_id, status);
+create unique index if not exists inventory_counts_number_unique on inventory_counts (number);
+create index if not exists inventory_counts_warehouse_status_idx on inventory_counts (warehouse_id, status);
+create unique index if not exists inventory_count_lines_count_product_unique on inventory_count_lines (inventory_count_id, product_id);
+create index if not exists stock_moves_warehouse_created_at_idx on stock_moves (warehouse_id, created_at desc);
 create table if not exists users (id serial primary key, name text not null, email text not null default '', role text not null default 'manager', status text not null default 'active', last_ip text not null default '', device text not null default '', two_fa boolean not null default false, two_fa_secret_encrypted text not null default '', two_fa_enabled_at timestamp, owner_initialized_at timestamp, agent_id integer unique, login text not null default '', password_hash text not null default '', last_login_at timestamp not null default now());
 create table if not exists activity (id serial primary key, actor_user_id integer, actor text not null, action text not null, entity text not null default '', entity_type text not null default '', entity_id integer, event_type text not null default 'business', severity text not null default 'info', ip text not null default '', metadata jsonb not null default '{}'::jsonb, created_at timestamp not null default now());
 create table if not exists content_blocks (id serial primary key, surface text not null, "key" text not null, title text not null, body text not null default '', enabled boolean not null default true, updated_at timestamp not null default now());
@@ -40,6 +68,8 @@ alter table activity add column if not exists severity text not null default 'in
 alter table activity add column if not exists ip text not null default '';
 alter table activity add column if not exists metadata jsonb not null default '{}'::jsonb;
 alter table sessions add column if not exists ip text not null default '';
+alter table orders add column if not exists sync_key text;
+create unique index if not exists orders_sync_key_unique on orders (sync_key) where sync_key is not null and sync_key <> '';
 create index if not exists activity_created_at_idx on activity (created_at desc);
 create index if not exists activity_actor_user_id_idx on activity (actor_user_id);
 create index if not exists sessions_expires_at_idx on sessions (expires_at);
@@ -81,19 +111,32 @@ create unique index if not exists users_login_lower_unique on users (lower(login
 create unique index if not exists users_agent_id_unique on users (agent_id) where agent_id is not null;
 create unique index if not exists users_single_owner_unique on users ((role)) where role = 'owner';
 create table if not exists sync_events (id serial primary key, source text not null default 'crm', target text not null default 'all', entity text not null, action text not null, status text not null default 'synced', payload jsonb not null default '{}'::jsonb, created_at timestamp not null default now());
-create table if not exists broadcasts (id serial primary key, title text not null default '', body text not null default '', recipients integer not null default 0, channel text not null default 'telegram', status text not null default 'sent', scheduled_at timestamp, sent_at timestamp not null default now(), created_by text not null default '', created_at timestamp not null default now());
+create table if not exists broadcasts (id serial primary key, title text not null default '', body text not null default '', recipients integer not null default 0, channel text not null default 'telegram', status text not null default 'queued', scheduled_at timestamp, sent_at timestamp not null default now(), created_by text not null default '', created_at timestamp not null default now());
+alter table broadcasts alter column status set default 'queued';
+create table if not exists broadcast_recipients (id serial primary key, broadcast_id integer not null, customer_id integer not null, channel text not null default 'telegram', status text not null default 'queued', created_at timestamp not null default now());
+create unique index if not exists broadcast_recipients_broadcast_customer_unique on broadcast_recipients (broadcast_id, customer_id);
+create index if not exists broadcast_recipients_customer_created_at_idx on broadcast_recipients (customer_id, created_at desc);
 create table if not exists campaigns (id serial primary key, title text not null default '', body text not null, channel text not null default 'telegram', attachments jsonb not null default '[]'::jsonb, segment jsonb not null default '{}'::jsonb, recipients integer not null default 0, delivered integer not null default 0, status text not null default 'sent', scheduled_at timestamp, created_at timestamp not null default now());
 create table if not exists promocodes (id serial primary key, code text not null unique, discount_type text not null default 'percent', discount_value numeric not null default 15, min_order_amount numeric not null default 100000, max_uses integer not null default 100, used_count integer not null default 0, status text not null default 'active', valid_until timestamp, created_at timestamp not null default now());
 create table if not exists marketing_triggers (id serial primary key, title text not null, event_key text not null, action_type text not null default 'discount_message', message_body text not null, discount_bonus integer not null default 0, is_active boolean not null default true, triggered_count integer not null default 0, created_at timestamp not null default now());
+alter table customers add column if not exists marketing_consent boolean not null default false;
+alter table customers add column if not exists marketing_consent_at timestamp;
+create table if not exists automation_runs (id serial primary key, trigger_id integer not null, customer_id integer not null, event_key text not null, action_type text not null default 'discount_message', status text not null default 'queued', created_at timestamp not null default now());
+alter table automation_runs alter column status set default 'queued';
+create unique index if not exists automation_runs_trigger_customer_event_unique on automation_runs (trigger_id, customer_id, event_key);
+create index if not exists automation_runs_customer_created_at_idx on automation_runs (customer_id, created_at desc);
 create table if not exists suppliers (id serial primary key, name text not null, contact_person text not null default '', phone text not null default '', email text not null default '', country text not null default 'Uzbekistan', city text not null default 'Tashkent', address text not null default '', inn text not null default '', category text not null default 'chemicals', rating integer not null default 5, lead_time_days integer not null default 7, total_purchased numeric not null default 0, status text not null default 'active', notes text not null default '', created_at timestamp not null default now());
-create table if not exists purchase_orders (id serial primary key, number text not null, supplier_id integer not null, status text not null default 'draft', total numeric not null default 0, paid numeric not null default 0, expected_at timestamp, received_at timestamp, notes text not null default '', created_by text not null default '', created_at timestamp not null default now());
+create table if not exists purchase_orders (id serial primary key, number text not null, supplier_id integer not null, warehouse_id integer, status text not null default 'draft', total numeric not null default 0, paid numeric not null default 0, expected_at timestamp, received_at timestamp, notes text not null default '', created_by text not null default '', created_at timestamp not null default now());
+alter table purchase_orders add column if not exists warehouse_id integer;
+create index if not exists purchase_orders_warehouse_status_idx on purchase_orders (warehouse_id, status);
 create table if not exists purchase_items (id serial primary key, purchase_order_id integer not null, product_id integer not null, name text not null, qty integer not null default 1, price numeric not null default 0);
 create table if not exists returns (id serial primary key, order_id integer not null, customer_id integer, reason text not null default 'defect', status text not null default 'pending', refund_amount numeric not null default 0, restock_items boolean not null default false, notes text not null default '', created_by text not null default '', created_at timestamp not null default now());
 create table if not exists couriers (id serial primary key, name text not null, phone text not null default '', vehicle text not null default 'car', zone text not null default 'Tashkent', status text not null default 'available', active_deliveries integer not null default 0, completed_today integer not null default 0, rating integer not null default 5, avatar_color text not null default '#3b82f6', created_at timestamp not null default now());
 create table if not exists deliveries (id serial primary key, order_id integer not null, courier_id integer, status text not null default 'pending', address text not null default '', city text not null default 'Tashkent', scheduled_at timestamp, delivered_at timestamp, notes text not null default '', created_at timestamp not null default now());
 create table if not exists agent_routes (id serial primary key, agent_id integer not null, route_date text not null, title text not null default '', notes text not null default '', status text not null default 'planned', assigned_by_user_id integer, assigned_by_name text not null default '', updated_at timestamp not null default now(), created_at timestamp not null default now());
 create table if not exists agent_route_stops (id serial primary key, route_id integer not null, sequence integer not null default 1, store_name text not null, store_address text not null default '', planned_latitude numeric, planned_longitude numeric, status text not null default 'planned', visit_id integer, notes text not null default '', completed_at timestamp, updated_at timestamp not null default now(), created_at timestamp not null default now());
-create table if not exists agent_visits (id serial primary key, agent_id integer not null, route_id integer, route_stop_id integer, store_name text not null, store_address text not null default '', gps_coords text not null default '41.2858, 69.2035', latitude numeric, longitude numeric, accuracy_meters numeric, location_captured_at timestamp, status text not null default 'order_placed', order_total numeric not null default 0, notes text not null default '', photos jsonb not null default '[]'::jsonb, source text not null default 'online', sync_key text, recorded_by_user_id integer, recorded_by_name text not null default '', visited_at timestamp not null default now(), created_at timestamp not null default now());
+create table if not exists agent_visits (id serial primary key, agent_id integer not null, route_id integer, route_stop_id integer, store_name text not null, store_address text not null default '', gps_coords text not null default '', latitude numeric, longitude numeric, accuracy_meters numeric, location_captured_at timestamp, status text not null default 'order_placed', order_total numeric not null default 0, notes text not null default '', photos jsonb not null default '[]'::jsonb, source text not null default 'online', sync_key text, recorded_by_user_id integer, recorded_by_name text not null default '', visited_at timestamp not null default now(), created_at timestamp not null default now());
+alter table agent_visits alter column gps_coords set default '';
 alter table agent_visits add column if not exists route_id integer;
 alter table agent_visits add column if not exists route_stop_id integer;
 alter table agent_visits add column if not exists latitude numeric;
@@ -145,6 +188,51 @@ create table if not exists knowledge_base (id serial primary key, title text not
 
 async function createTables() {
   await db.execute(sql.raw(DDL));
+}
+
+/**
+ * Migrate the legacy aggregate `products.stock` into the default physical
+ * warehouse exactly once per product. Later inventory operations own this table.
+ */
+export async function bootstrapWarehouseStocks() {
+  await db.execute(sql.raw(`
+    insert into warehouses (code, name, city, is_default, status)
+    values ('MAIN', 'Основной склад', 'Tashkent', true, 'active')
+    on conflict (code) do nothing;
+
+    insert into warehouse_stocks (warehouse_id, product_id, on_hand, reserved)
+    select warehouse.id, product.id, product.stock, 0
+    from warehouses warehouse
+    cross join products product
+    where warehouse.is_default = true
+      and warehouse.status = 'active'
+    on conflict (warehouse_id, product_id) do nothing;
+
+    -- One compatibility cutover absorbs legacy aggregate writes made after the
+    -- physical table first existed but before all writer paths were migrated.
+    with marker as (
+      insert into inventory_migrations (key) values ('warehouse_stock_cutover_v1')
+      on conflict (key) do nothing
+      returning key
+    ), main as (
+      select id from warehouses where is_default = true and status = 'active' limit 1
+    ), availability as (
+      select product_id, sum(on_hand - reserved) as available
+      from warehouse_stocks
+      group by product_id
+    ), deltas as (
+      select product.id as product_id, product.stock - coalesce(availability.available, 0) as delta
+      from products product
+      left join availability on availability.product_id = product.id
+    )
+    update warehouse_stocks balance
+    set on_hand = balance.on_hand + deltas.delta, updated_at = now()
+    from marker, main, deltas
+    where balance.warehouse_id = main.id
+      and balance.product_id = deltas.product_id
+      and deltas.delta <> 0
+      and balance.on_hand + deltas.delta >= balance.reserved;
+  `));
 }
 
 const OWNER_LOGIN_PATTERN = /^[a-z0-9._-]{3,24}$/;
@@ -262,10 +350,16 @@ function rnd(n: number) {
 async function run() {
   await createTables();
   await ensureOwner();
-  if (!shouldSeedDemoData) return;
+  if (!shouldSeedDemoData) {
+    await bootstrapWarehouseStocks();
+    return;
+  }
 
   const existing = await db.execute<{ count: string }>(sql`select count(*)::text as count from products`);
-  if (Number(existing.rows[0]?.count ?? "0") > 0) return;
+  if (Number(existing.rows[0]?.count ?? "0") > 0) {
+    await bootstrapWarehouseStocks();
+    return;
+  }
 
   const cats = await db.insert(s.categories).values(CATEGORIES).returning();
 
@@ -303,6 +397,7 @@ const prodRows = PRODUCTS.map(([name, catIdx, icon, price, cost, volume], i) => 
     sold: 40 + rnd(900),
   }));
   const prods = await db.insert(s.products).values(prodRows).returning();
+  const now = Date.now();
 
   const custRows = NAMES.map(([f, l, u], i) => ({
     firstName: f,
@@ -315,6 +410,8 @@ const prodRows = PRODUCTS.map(([name, catIdx, icon, price, cost, volume], i) => 
     source: SOURCES[i % SOURCES.length],
     isVip: i % 4 === 0,
     bonus: rnd(120) * 1000,
+    marketingConsent: i % 5 !== 0,
+    marketingConsentAt: i % 5 !== 0 ? new Date(now - (i + 1) * 86400000) : null,
     tags: i % 4 === 0 ? ["VIP", "Опт"] : ["Розница"],
     address: `ул. Амира Темура, ${10 + i}`,
   }));
@@ -340,8 +437,6 @@ const prodRows = PRODUCTS.map(([name, catIdx, icon, price, cost, volume], i) => 
     avatarColor: String(color),
   }));
   const ags = await db.insert(s.agents).values(agentRows).returning();
-
-  const now = Date.now();
 
   await db.insert(s.agentVisits).values([
     {
@@ -441,6 +536,7 @@ const prodRows = PRODUCTS.map(([name, catIdx, icon, price, cost, volume], i) => 
         category: "sales",
         account: order.payment,
         amount: String(total),
+        channel: order.channel,
         note: `Оплата заказа ${order.number}`,
         createdAt: created,
       });
@@ -629,6 +725,7 @@ const prodRows = PRODUCTS.map(([name, catIdx, icon, price, cost, volume], i) => 
     { title: "Достижение статуса VIP", eventKey: "vip_threshold", actionType: "bonus_points", messageBody: "🎉 Поздравляем! Вы стали VIP-клиентом DELIS. Вам начислено 50 000 бонусных баллов и постоянная скидка 15%.", discountBonus: 50000, isActive: true, triggeredCount: 24 },
     { title: "День рождения клиента", eventKey: "birthday", actionType: "discount_message", messageBody: "🎂 С Днём рождения от команды DELIS! Дарим вам персональный подарок к заказу и бесплатную доставку.", discountBonus: 15, isActive: true, triggeredCount: 41 },
   ]);
+  await bootstrapWarehouseStocks();
 }
 
 export function ensureSeed() {
