@@ -43,6 +43,7 @@ test("an explicitly allowlisted public proxy origin can write without opening ot
     const allowed = rejectForeignWrite(request({
       origin: "https://3000-preview.e2b.app",
       host: "internal-preview:3000",
+      "x-forwarded-host": "not a valid host",
       "x-forwarded-proto": "http",
     }));
     assert.equal(allowed, null);

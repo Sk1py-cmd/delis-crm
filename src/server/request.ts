@@ -36,8 +36,12 @@ export function rejectForeignWrite(req: NextRequest): NextResponse | null {
 
   try {
     const requestOrigin = new URL(origin).origin;
+    // This exact allowlist is for a known public proxy origin. Check it before
+    // parsing proxy headers, which may be unavailable or non-standard there.
+    if (configuredWriteOrigins().has(requestOrigin)) return null;
+
     const expectedOrigin = new URL(`${protocol}://${host}`).origin;
-    if (!host || !protocol || (requestOrigin !== expectedOrigin && !configuredWriteOrigins().has(requestOrigin))) {
+    if (!host || !protocol || requestOrigin !== expectedOrigin) {
       return NextResponse.json({ error: "Недопустимый источник запроса" }, { status: 403 });
     }
   } catch {
