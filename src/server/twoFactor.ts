@@ -5,6 +5,9 @@ import { db } from "@/db";
 import * as s from "@/db/schema";
 import { ensureSeed } from "@/db/seed";
 import { verifyPassword } from "@/server/password";
+import { twoFactorCookieOptions } from "@/server/cookies";
+
+export { twoFactorCookieOptions } from "@/server/cookies";
 
 export const TWO_FACTOR_CHALLENGE_COOKIE = "delis_2fa_challenge";
 export const TWO_FACTOR_ENROLLMENT_COOKIE = "delis_2fa_enrollment";
@@ -186,16 +189,6 @@ function otpAuthUri(login: string, secret: string) {
   const issuer = "DELIS CRM";
   const label = encodeURIComponent(`${issuer}:${login}`);
   return `otpauth://totp/${label}?secret=${secret}&issuer=${encodeURIComponent(issuer)}&algorithm=SHA1&digits=${TOTP_DIGITS}&period=${TOTP_PERIOD_SECONDS}`;
-}
-
-export function twoFactorCookieOptions(maxAge: number) {
-  return {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    path: "/",
-    sameSite: "strict" as const,
-    maxAge,
-  };
 }
 
 export function clearTwoFactorCookie(response: { cookies: { set: (name: string, value: string, options: ReturnType<typeof twoFactorCookieOptions>) => void } }, name: string) {

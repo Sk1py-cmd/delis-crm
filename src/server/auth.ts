@@ -6,20 +6,11 @@ import { db } from "@/db";
 import * as s from "@/db/schema";
 import { ensureSeed } from "@/db/seed";
 import { requestIp } from "@/server/request";
+import { SESSION_MAX_AGE_SECONDS } from "@/server/cookies";
+
+export { SESSION_MAX_AGE_SECONDS, sessionCookieOptions } from "@/server/cookies";
 
 export const COOKIE = "delis_session";
-export const SESSION_MAX_AGE_SECONDS = 30 * 86400;
-
-export function sessionCookieOptions(maxAge = SESSION_MAX_AGE_SECONDS) {
-  return {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    path: "/",
-    sameSite: "lax" as const,
-    maxAge,
-  };
-}
-
 /** Creates the durable session record; callers place the opaque token in an HttpOnly cookie. */
 export async function createSessionForUser(userId: number, req: NextRequest) {
   await ensureSeed();
