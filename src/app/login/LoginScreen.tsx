@@ -1,28 +1,31 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
-import { Sparkles, UserRound, Lock, Eye, EyeOff, LogIn, Languages } from "lucide-react";
+import { ArrowLeft, Eye, EyeOff, Languages, Lock, LogIn, ShieldCheck, Sparkles, UserRound } from "lucide-react";
 import { useT } from "@/shared/i18n/useT";
 import { useLocale } from "@/shared/store/locale";
 import { LOCALES, type Locale } from "@/shared/i18n/locales";
 
+type LoginResponse = { ok?: boolean; requiresTwoFactor?: boolean; error?: string };
+
 export function LoginScreen() {
-  const [login, setLogin] = useState("owner");
+  const [login, setLogin] = useState("");
   const [password, setPassword] = useState("");
+  const [twoFactorCode, setTwoFactorCode] = useState("");
+  const [twoFactorPending, setTwoFactorPending] = useState(false);
   const [show, setShow] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [langOpen, setLangOpen] = useState(false);
-  const router = useRouter();
   const t = useT();
   const { locale, setLocale } = useLocale();
 
-  const submit = async (e: React.FormEvent) => {
+  const submitPassword = async (e: React.FormEvent) => {
     e.preventDefault();
     const normalizedLogin = login.trim().toLowerCase();
-    const normalizedPassword = password.trim();
+    // Passwords are opaque credentials; never trim or otherwise transform them client-side.
+    const normalizedPassword = password;
     setError("");
 
     if (!normalizedLogin || !normalizedPassword) {
@@ -38,9 +41,17 @@ export function LoginScreen() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ login: normalizedLogin, password: normalizedPassword }),
       });
-      const data = (await res.json()) as { ok?: boolean; error?: string };
+      const data = (await res.json()) as LoginResponse;
+      if (data.requiresTwoFactor) {
+        setPassword("");
+        setTwoFactorCode("");
+        setTwoFactorPending(true);
+        return;
+      }
       if (data.ok) {
-        window.location.href = "/";
+        // A hard navigation makes the new HttpOnly session visible immediately,
+        // including inside an embedded browser preview.
+        window.location.replace("/");
         return;
       }
       setError(data.error ?? t("login.errorEmpty"));
@@ -50,6 +61,55 @@ export function LoginScreen() {
       setLoading(false);
     }
   };
+
+  const submitTwoFactor = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError("");
+    if (!twoFactorCode.trim()) {
+      setError(t("login.twoFactorPlaceholder"));
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const res = await fetch("/api/auth/two-factor", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: twoFactorCode }),
+      });
+      const data = (await res.json()) as LoginResponse;
+      if (data.ok) {
+        // A hard navigation makes the new HttpOnly session visible immediately,
+        // including inside an embedded browser preview.
+        window.location.replace("/");
+        return;
+      }
+      setError(data.error ?? t("login.twoFactorPlaceholder"));
+    } catch {
+      setError(t("login.errorConnection"));
+    } finally {
+      setTwoFactorCode("");
+      setLoading(false);
+    }
+  };
+
+  const returnToPassword = async () => {
+    setLoading(true);
+    try {
+      await fetch("/api/auth/two-factor", { method: "DELETE", credentials: "same-origin" });
+    } catch {
+      // The UI can still safely return to the password step if cleanup is interrupted.
+    } finally {
+      setTwoFactorPending(false);
+      setTwoFactorCode("");
+      setError("");
+      setLoading(false);
+    }
+  };
+
+  const title = twoFactorPending ? t("login.twoFactorTitle") : t("login.title");
+  const subtitle = twoFactorPending ? t("login.twoFactorSubtitle") : t("login.subtitle");
 
   return (
     <div className="min-h-screen relative overflow-hidden grid place-items-center p-4">
@@ -67,12 +127,8 @@ export function LoginScreen() {
         />
       ))}
 
-      {/* Переключатель языка */}
       <div className="absolute top-4 right-4 z-20">
-        <button
-          className="btn !px-3 !py-2"
-          onClick={() => setLangOpen((v) => !v)}
-        >
+        <button className="btn !px-3 !py-2" onClick={() => setLangOpen((value) => !value)}>
           <Languages size={15} /> {LOCALES[locale].flag} {LOCALES[locale].nativeName}
         </button>
         <AnimatePresence>
@@ -83,7 +139,7 @@ export function LoginScreen() {
               exit={{ opacity: 0, y: 6, scale: 0.98 }}
               className="glass card-pad !p-1.5 absolute right-0 mt-2 w-44"
             >
-              {Object.entries(LOCALES).map(([code, l]) => (
+              {Object.entries(LOCALES).map(([code, language]) => (
                 <button
                   key={code}
                   onClick={() => { setLocale(code as Locale); setLangOpen(false); }}
@@ -94,7 +150,7 @@ export function LoginScreen() {
                     fontWeight: locale === code ? 600 : 400,
                   }}
                 >
-                  <span className="text-base">{l.flag}</span> {l.nativeName}
+                  <span className="text-base">{language.flag}</span> {language.nativeName}
                 </button>
               ))}
             </motion.div>
@@ -113,7 +169,7 @@ export function LoginScreen() {
             className="w-12 h-12 rounded-2xl grid place-items-center"
             style={{ background: "linear-gradient(135deg,var(--primary),var(--accent))", boxShadow: "0 14px 34px -14px var(--primary)" }}
           >
-            <Sparkles size={22} color="#fff" />
+            {twoFactorPending ? <ShieldCheck size={22} color="#fff" /> : <Sparkles size={22} color="#fff" />}
           </div>
           <div>
             <div className="text-lg font-semibold tracking-tight leading-5">DELIS</div>
@@ -121,34 +177,53 @@ export function LoginScreen() {
           </div>
         </div>
 
-        <h1 className="text-2xl font-semibold tracking-tight">{t("login.title")}</h1>
-        <p className="muted text-sm mt-1.5">{t("login.subtitle")}</p>
+        <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
+        <p className="muted text-sm mt-1.5">{subtitle}</p>
 
-        <form onSubmit={submit} className="flex flex-col gap-3.5 mt-6">
-          <div className="relative">
-            <UserRound size={16} className="absolute left-4 top-1/2 -translate-y-1/2 muted" />
-            <input
-              className="input !pl-11 !py-3"
-              placeholder={t("login.loginPlaceholder")}
-              value={login}
-              onChange={(e) => setLogin(e.target.value)}
-              autoComplete="username"
-            />
-          </div>
-          <div className="relative">
-            <Lock size={16} className="absolute left-4 top-1/2 -translate-y-1/2 muted" />
-            <input
-              className="input !pl-11 !pr-11 !py-3"
-              placeholder={t("login.passwordPlaceholder")}
-              type={show ? "text" : "password"}
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              autoComplete="current-password"
-            />
-            <button type="button" className="absolute right-3.5 top-1/2 -translate-y-1/2 muted" onClick={() => setShow((v) => !v)}>
-              {show ? <EyeOff size={16} /> : <Eye size={16} />}
-            </button>
-          </div>
+        <form onSubmit={twoFactorPending ? submitTwoFactor : submitPassword} className="flex flex-col gap-3.5 mt-6">
+          {twoFactorPending ? (
+            <>
+              <div className="relative">
+                <ShieldCheck size={16} className="absolute left-4 top-1/2 -translate-y-1/2 muted" />
+                <input
+                  className="input !pl-11 !py-3"
+                  placeholder={t("login.twoFactorPlaceholder")}
+                  value={twoFactorCode}
+                  onChange={(e) => setTwoFactorCode(e.target.value)}
+                  autoComplete="one-time-code"
+                  autoFocus
+                />
+              </div>
+              <p className="text-xs muted -mt-1">{t("login.twoFactorFooter")}</p>
+            </>
+          ) : (
+            <>
+              <div className="relative">
+                <UserRound size={16} className="absolute left-4 top-1/2 -translate-y-1/2 muted" />
+                <input
+                  className="input !pl-11 !py-3"
+                  placeholder={t("login.loginPlaceholder")}
+                  value={login}
+                  onChange={(e) => setLogin(e.target.value)}
+                  autoComplete="username"
+                />
+              </div>
+              <div className="relative">
+                <Lock size={16} className="absolute left-4 top-1/2 -translate-y-1/2 muted" />
+                <input
+                  className="input !pl-11 !pr-11 !py-3"
+                  placeholder={t("login.passwordPlaceholder")}
+                  type={show ? "text" : "password"}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  autoComplete="current-password"
+                />
+                <button type="button" className="absolute right-3.5 top-1/2 -translate-y-1/2 muted" onClick={() => setShow((value) => !value)}>
+                  {show ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+              </div>
+            </>
+          )}
 
           {error && (
             <motion.div
@@ -162,17 +237,23 @@ export function LoginScreen() {
           )}
 
           <motion.button whileTap={{ scale: 0.98 }} className="btn btn-primary justify-center !py-3 mt-1" disabled={loading}>
-            {loading ? t("login.submitting") : (
+            {loading ? (twoFactorPending ? t("login.twoFactorSubmitting") : t("login.submitting")) : (
               <>
-                <LogIn size={16} /> {t("login.submit")}
+                <LogIn size={16} /> {twoFactorPending ? t("login.twoFactorSubmit") : t("login.submit")}
               </>
             )}
           </motion.button>
+
+          {twoFactorPending && (
+            <button type="button" className="btn justify-center" disabled={loading} onClick={() => void returnToPassword()}>
+              <ArrowLeft size={15} /> {t("login.twoFactorBack")}
+            </button>
+          )}
         </form>
 
         <div className="mt-5 flex items-center gap-2 text-[0.72rem] muted">
           <Lock size={13} color="var(--success)" />
-          {t("login.footer")}
+          {twoFactorPending ? t("login.twoFactorFooter") : t("login.footer")}
         </div>
       </motion.div>
     </div>

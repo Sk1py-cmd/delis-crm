@@ -1,10 +1,13 @@
+import { requireAccess } from "@/server/guard";
 import { getProcurementData } from "@/server/queries";
+import { getInventoryData } from "@/server/inventory";
 import { SuppliersClient } from "./SuppliersClient";
 
 export const dynamic = "force-dynamic";
 
 export default async function SuppliersPage() {
-  const data = await getProcurementData();
+  const viewer = await requireAccess("/suppliers");
+  const [data, inventory] = await Promise.all([getProcurementData(), getInventoryData(viewer)]);
 
   return (
     <SuppliersClient
@@ -28,6 +31,8 @@ export default async function SuppliersPage() {
         number: o.number,
         supplierId: o.supplierId,
         supplierName: o.supplierName,
+        warehouseId: o.warehouseId,
+        warehouseName: o.warehouseName,
         status: o.status,
         total: String(o.total),
         paid: String(o.paid),
@@ -35,6 +40,12 @@ export default async function SuppliersPage() {
         receivedAt: o.receivedAt ? String(o.receivedAt) : null,
         notes: o.notes,
         createdAt: String(o.createdAt),
+      }))}
+      warehouses={inventory.warehouses.filter((warehouse) => warehouse.status === "active").map((warehouse) => ({
+        id: warehouse.id,
+        code: warehouse.code,
+        name: warehouse.name,
+        isDefault: warehouse.isDefault,
       }))}
       lowStock={data.lowStock.map((p) => ({
         id: p.id,

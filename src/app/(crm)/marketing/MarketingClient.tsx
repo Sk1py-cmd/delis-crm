@@ -58,13 +58,27 @@ export interface CampaignLite {
   createdAt: string;
 }
 
+export interface AutomationRunLite {
+  id: number;
+  eventKey: string;
+  actionType: string;
+  status: string;
+  createdAt: string;
+  triggerTitle: string;
+  customerName: string;
+  customerSource: string;
+}
+
 export interface AdChannelLite {
+  key: string;
   name: string;
   spent: number;
   revenue: number;
+  profit: number;
   leads: number;
   orders: number;
-  roi: number;
+  conversion: number | null;
+  roi: number | null;
   color: string;
 }
 
@@ -72,16 +86,20 @@ export function MarketingClient({
   promos,
   triggers,
   campaigns,
+  recentRuns,
   adChannels,
   totalSales,
   ordersCount,
+  canRunAutomations,
 }: {
   promos: PromocodeLite[];
   triggers: TriggerLite[];
   campaigns: CampaignLite[];
+  recentRuns: AutomationRunLite[];
   adChannels: AdChannelLite[];
   totalSales: number;
   ordersCount: number;
+  canRunAutomations: boolean;
 }) {
   const [tab, setTab] = useState("promos");
   const [openModal, setOpenModal] = useState(false);
@@ -102,9 +120,10 @@ export function MarketingClient({
   const activePromosCount = promos.filter((p) => p.status === "active").length;
   const totalTriggersCount = triggers.reduce((sum, t) => sum + t.triggeredCount, 0);
 
-  const avgRoi = Math.round(
-    adChannels.reduce((sum, c) => sum + c.roi, 0) / Math.max(1, adChannels.length),
-  );
+  const attributedChannels = adChannels.filter((channel) => channel.roi !== null);
+  const avgRoi = attributedChannels.length
+    ? Math.round(attributedChannels.reduce((sum, channel) => sum + (channel.roi ?? 0), 0) / attributedChannels.length)
+    : null;
 
   const handleCreatePromo = async () => {
     if (!form.code.trim()) {
@@ -155,6 +174,19 @@ export function MarketingClient({
     }
   };
 
+  const handleRunSleepingCustomers = async () => {
+    setBusy(true);
+    try {
+      const result = await postManage("runCustomerAutomations");
+      toast(`Проверено клиентов: ${result.customers ?? 0}. Запущено сценариев: ${result.runs ?? 0}.`, "ok");
+      router.refresh();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "Не удалось запустить автоматизацию", "err");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <>
       <PageHeader
@@ -175,13 +207,13 @@ export function MarketingClient({
         {[
           {
             label: tr("marketing.revenueByChannels"),
-            value: compact(adChannels.reduce((sum, c) => sum + c.revenue, 0)),
+            value: compact(totalSales),
             color: "#8b5cf6",
             icon: "💰",
           },
           {
             label: tr("marketing.avgRoi"),
-            value: `${avgRoi}%`,
+            value: avgRoi === null ? "—" : `${avgRoi}%`,
             color: "#22c55e",
             icon: "📈",
           },
@@ -337,7 +369,7 @@ export function MarketingClient({
               <h3 className="font-semibold">Как работают скидки</h3>
             </div>
             <p className="text-sm muted leading-relaxed">
-              Созданный промокод мгновенно становится доступен для ввода клиентами:
+              Созданный промокод фиксируется в CRM и передаётся в очередь синхронизации для подключённых каналов:
             </p>
             <div className="flex flex-col gap-3 mt-4">
               {[
@@ -378,9 +410,16 @@ export function MarketingClient({
                   Автоматические маркетинговые триггеры (Воронки)
                 </h3>
               </div>
-              <Badge color="#f97316">
-                Авто-срабатывание 24/7 без участия менеджера
-              </Badge>
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <Badge color="#f97316">
+                  Заказы запускают VIP-сценарии автоматически
+                </Badge>
+                {canRunAutomations && (
+                  <button type="button" className="btn text-xs" disabled={busy} onClick={() => void handleRunSleepingCustomers()}>
+                    <Zap size={14} /> {busy ? "Запускаем…" : "Проверить неактивных"}
+                  </button>
+                )}
+              </div>
             </div>
 
             <div className="flex flex-col gap-3">
@@ -456,27 +495,25 @@ export function MarketingClient({
               <h3 className="font-semibold">Эффективность триггеров</h3>
             </div>
             <p className="text-sm muted leading-relaxed">
-              Автоматические воронки возвращают до 28% клиентов с брошенными заказами и увеличивают повторные покупки.
+              VIP-сценарий запускается при заказе, а возврат неактивных клиентов Owner запускает по проверяемому списку. Сообщения уходят только клиентам с подтверждённым согласием.
             </p>
-            <div className="mt-4 flex flex-col gap-3">
-              <div
-                className="rounded-2xl p-3"
-                style={{ background: "rgba(var(--table-row))" }}
-              >
-                <div className="text-xs muted">Возврат брошенных корзин</div>
-                <div className="text-lg font-bold mt-1 text-green-500">
-                  +184 заказа
+            <div className="mt-4 flex flex-col gap-2 max-h-64 overflow-y-auto">
+              <div className="text-xs muted uppercase tracking-wider">Последние выполнения</div>
+              {recentRuns.map((run) => (
+                <div key={run.id} className="rounded-2xl p-3" style={{ background: "rgba(var(--table-row))" }}>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-sm font-medium truncate">{run.triggerTitle}</span>
+                    <Badge color={run.status === "queued" ? "#f97316" : "#22c55e"}>{run.status === "queued" ? "В очереди" : run.status}</Badge>
+                  </div>
+                  <div className="text-xs muted mt-1 truncate">{run.customerName} · {run.customerSource}</div>
+                  <div className="text-xs muted mt-1">{dt(run.createdAt)}</div>
                 </div>
-              </div>
-              <div
-                className="rounded-2xl p-3"
-                style={{ background: "rgba(var(--table-row))" }}
-              >
-                <div className="text-xs muted">Реактивация спящих клиентов</div>
-                <div className="text-lg font-bold mt-1 text-purple-400">
-                  +96 повторных покупок
+              ))}
+              {recentRuns.length === 0 && (
+                <div className="rounded-2xl p-3 text-sm muted" style={{ background: "rgba(var(--table-row))" }}>
+                  Выполнений ещё нет. Сценарии появятся здесь после первого срабатывания.
                 </div>
-              </div>
+              )}
             </div>
           </Card>
         </div>
@@ -488,11 +525,14 @@ export function MarketingClient({
             <div className="card-pad pb-2 flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <BarChart3 size={18} color="var(--primary)" />
-                <h3 className="font-semibold">Рекламные каналы и ROI</h3>
+                <h3 className="font-semibold">Каналы продаж и атрибуция</h3>
               </div>
-              <Badge color="#22c55e">
-                Общая окупаемость: {avgRoi}%
-              </Badge>
+              <div className="flex flex-wrap justify-end gap-2">
+                <Badge color="#3b82f6">Заказов: {ordersCount}</Badge>
+                <Badge color={avgRoi === null ? "#f97316" : "#22c55e"}>
+                  {avgRoi === null ? "Добавьте расходы с каналом" : `Средний ROI: ${avgRoi}%`}
+                </Badge>
+              </div>
             </div>
             <div className="overflow-x-auto">
               <table>
@@ -503,26 +543,29 @@ export function MarketingClient({
                     <th>Выручка</th>
                     <th>Лиды</th>
                     <th>Заказы</th>
+                    <th>Конверсия</th>
                     <th>ROI</th>
                   </tr>
                 </thead>
                 <tbody>
                   {adChannels.map((c) => (
-                    <tr key={c.name}>
+                    <tr key={c.key || "unallocated"}>
                       <td className="font-semibold">{c.name}</td>
                       <td className="muted">{compact(c.spent)}</td>
                       <td className="font-bold">{compact(c.revenue)}</td>
                       <td>{c.leads}</td>
                       <td>{c.orders}</td>
+                      <td>{c.conversion === null ? "—" : `${c.conversion.toFixed(1)}%`}</td>
                       <td>
-                        <Badge
-                          color={c.roi >= 300 ? "#22c55e" : "#8b5cf6"}
-                        >
-                          +{c.roi}%
+                        <Badge color={c.roi === null ? "#94a3b8" : c.roi >= 0 ? "#22c55e" : "#ef4444"}>
+                          {c.roi === null ? "Не задан" : `${c.roi >= 0 ? "+" : ""}${c.roi.toFixed(0)}%`}
                         </Badge>
                       </td>
                     </tr>
                   ))}
+                  {adChannels.length === 0 && (
+                    <tr><td colSpan={7} className="muted">Пока нет заказов, лидов или расходов с атрибуцией.</td></tr>
+                  )}
                 </tbody>
               </table>
             </div>
@@ -534,16 +577,22 @@ export function MarketingClient({
               <h3 className="font-semibold">Сравнение окупаемости</h3>
             </div>
             <p className="text-sm muted mb-4">
-              Самую высокую рентабельность показывают рекомендации агентов B2B (695%) и Telegram Mini App (584%).
+              ROI считается только там, где маркетинговый расход проведён с указанным каналом. Заказы и лиды берутся из фактических записей CRM.
             </p>
-            <Bars
-              data={adChannels.map((c) => ({
-                name: c.name.split(" ")[0],
-                value: c.roi,
-              }))}
-              height={220}
-              color="var(--primary)"
-            />
+            {attributedChannels.length > 0 ? (
+              <Bars
+                data={attributedChannels.map((c) => ({
+                  name: c.name.split(" ")[0],
+                  value: c.roi ?? 0,
+                }))}
+                height={220}
+                color="var(--primary)"
+              />
+            ) : (
+              <div className="rounded-2xl p-4 text-sm muted" style={{ background: "rgba(var(--table-row))" }}>
+                Проведите расход в категории «Маркетинг» и выберите канал, чтобы построить ROI.
+              </div>
+            )}
           </Card>
         </div>
       )}

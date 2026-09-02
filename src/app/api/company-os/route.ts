@@ -1,12 +1,13 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { getCompanyOS } from "@/server/queries";
-import { getSessionUser } from "@/server/auth";
+import { requireApiCapability } from "@/server/apiAuth";
 
 export const dynamic = "force-dynamic";
 
-export async function GET() {
-  const user = await getSessionUser();
-  if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+export async function GET(req: NextRequest) {
+  const auth = await requireApiCapability(req, "company:read");
+  if (!auth.ok) return auth.response;
+
   const os = await getCompanyOS();
   return NextResponse.json({
     ok: true,

@@ -20,10 +20,16 @@ import {
   RotateCcw,
   Building2,
   CheckSquare,
+  FileCheck2,
+  Target,
   TrendingUp,
   BookOpen,
+  Navigation,
   Plug,
 } from "lucide-react";
+import { canAccess, ROLE_ACCESS } from "./access";
+
+export { canAccess, ROLE_ACCESS };
 
 export type NavGroup = "overview" | "sales" | "communications" | "channels" | "management";
 
@@ -37,28 +43,8 @@ export interface NavItem {
   roles?: string[];
 }
 
-/** Разделы, доступные каждой роли (owner/admin видят всё) */
-export const ROLE_ACCESS: Record<string, string[]> = {
-  manager: ["/", "/company-os", "/analytics", "/tasks", "/knowledge", "/orders", "/products", "/warehouse", "/suppliers", "/delivery", "/returns", "/customers", "/agents", "/marketing", "/chat", "/broadcast", "/notifications", "/miniapp", "/website", "/instagram", "/settings"],
-  warehouse: ["/", "/tasks", "/knowledge", "/products", "/warehouse", "/suppliers", "/returns", "/delivery", "/settings"],
-  agent: ["/", "/tasks", "/knowledge", "/orders", "/customers", "/agents", "/chat", "/settings"],
-  support: ["/", "/tasks", "/knowledge", "/chat", "/customers", "/orders", "/returns", "/notifications", "/settings"],
-  moderator: ["/", "/tasks", "/knowledge", "/products", "/miniapp", "/website", "/instagram", "/marketing", "/broadcast", "/settings"],
-  operator: ["/", "/tasks", "/knowledge", "/orders", "/customers", "/chat", "/delivery", "/settings"],
-};
-
 export function navForRole(role: string): NavItem[] {
-  if (role === "owner" || role === "admin") return NAV;
-  const allowed = ROLE_ACCESS[role];
-  if (!allowed) return NAV;
-  return NAV.filter((n) => allowed.includes(n.href));
-}
-
-export function canAccess(role: string, href: string): boolean {
-  if (role === "owner" || role === "admin") return true;
-  const allowed = ROLE_ACCESS[role];
-  if (!allowed) return true;
-  return allowed.includes(href);
+  return NAV.filter((item) => canAccess(role, item.href));
 }
 
 export const NAV: NavItem[] = [
@@ -66,14 +52,18 @@ export const NAV: NavItem[] = [
   { href: "/company-os", labelKey: "companyOS", icon: Sparkles, group: "overview" },
   { href: "/analytics", labelKey: "analytics", icon: BarChart3, group: "overview" },
   { href: "/pnl", labelKey: "pnl", icon: TrendingUp, group: "overview" },
+  { href: "/reports", labelKey: "ownerReports", icon: BarChart3, group: "overview" },
   { href: "/knowledge", labelKey: "knowledge", icon: BookOpen, group: "overview" },
   { href: "/tasks", labelKey: "tasks", icon: CheckSquare, group: "overview" },
+  { href: "/kpi", labelKey: "kpi", icon: Target, group: "overview" },
+  { href: "/approvals", labelKey: "approvals", icon: FileCheck2, group: "management" },
   { href: "/orders", labelKey: "orders", icon: ShoppingCart, group: "sales" },
   { href: "/products", labelKey: "products", icon: Package, group: "sales" },
   { href: "/warehouse", labelKey: "warehouse", icon: Warehouse, group: "sales" },
   { href: "/suppliers", labelKey: "suppliers", icon: Building2, group: "sales" },
   { href: "/customers", labelKey: "customers", icon: Users, group: "sales" },
   { href: "/agents", labelKey: "agents", icon: UserCog, group: "sales" },
+  { href: "/routes", labelKey: "routes", icon: Navigation, group: "sales" },
   { href: "/marketing", labelKey: "marketing", icon: Sparkles, group: "sales" },
   { href: "/delivery", labelKey: "delivery", icon: Truck, group: "sales" },
   { href: "/returns", labelKey: "returns", icon: RotateCcw, group: "sales" },
@@ -85,6 +75,7 @@ export const NAV: NavItem[] = [
   { href: "/instagram", labelKey: "instagram", icon: Camera, group: "channels" },
   { href: "/finance", labelKey: "finance", icon: Wallet, group: "management" },
   { href: "/users", labelKey: "users", icon: ShieldCheck, group: "management" },
+  { href: "/security", labelKey: "security", icon: ShieldCheck, group: "management" },
   { href: "/integrations", labelKey: "integrations", icon: Plug, group: "management" },
   { href: "/agent-portal", labelKey: "agentPortal", icon: Smartphone, group: "management" },
   { href: "/settings", labelKey: "settings", icon: Settings, group: "management" },

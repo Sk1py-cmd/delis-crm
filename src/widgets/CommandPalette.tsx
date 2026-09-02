@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { useRouter } from "next/navigation";
 import { Search, CornerDownLeft } from "lucide-react";
-import { NAV } from "@/shared/config/nav";
+import { navForRole } from "@/shared/config/nav";
 import { useT } from "@/shared/i18n/useT";
 
 export interface SearchHit {
@@ -14,14 +14,14 @@ export interface SearchHit {
   href: string;
 }
 
-export function CommandPalette({ open, setOpen }: { open: boolean; setOpen: (v: boolean) => void }) {
+export function CommandPalette({ open, setOpen, role }: { open: boolean; setOpen: (v: boolean) => void; role: string }) {
   const [q, setQ] = useState("");
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [idx, setIdx] = useState(0);
   const router = useRouter();
   const t = useT();
 
-  const navHits: SearchHit[] = NAV.filter((n) => t(`nav.${n.labelKey}`).toLowerCase().includes(q.toLowerCase())).map((n) => ({
+  const navHits: SearchHit[] = navForRole(role).filter((n) => t(`nav.${n.labelKey}`).toLowerCase().includes(q.toLowerCase())).map((n) => ({
     type: t("nav.section") || "Раздел",
     title: t(`nav.${n.labelKey}`),
     subtitle: t(`group.${n.group}`),
@@ -41,10 +41,7 @@ export function CommandPalette({ open, setOpen }: { open: boolean; setOpen: (v: 
   }, [setOpen]);
 
   useEffect(() => {
-    if (!q.trim()) {
-      setHits([]);
-      return;
-    }
+    if (!q.trim()) return;
     const t = setTimeout(() => {
       fetch(`/api/search?q=${encodeURIComponent(q)}`)
         .then((r) => r.json())
@@ -54,7 +51,7 @@ export function CommandPalette({ open, setOpen }: { open: boolean; setOpen: (v: 
     return () => clearTimeout(t);
   }, [q]);
 
-  const all = [...navHits, ...hits].slice(0, 14);
+  const all = [...navHits, ...(q.trim() ? hits : [])].slice(0, 14);
 
   const go = useCallback(
     (h: SearchHit) => {

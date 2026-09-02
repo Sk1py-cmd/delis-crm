@@ -1,16 +1,28 @@
-import * as XLSX from "xlsx";
+import writeXlsxFile, { type SheetData } from "write-excel-file/browser";
+
+const FORMULA_PREFIX = /^[\t\r\n ]*[=+\-@]/;
+
+/** Prevent spreadsheet applications from interpreting exported customer text as a formula. */
+export function safeExcelText(value: string) {
+  return FORMULA_PREFIX.test(value) ? `'${value}` : value;
+}
+
+function safeFilename(filename: string) {
+  return filename
+    .replace(/[^\p{L}\p{N}._-]+/gu, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 120) || "delis-export";
+}
 
 export function exportXLSX(headers: string[], rows: (string | number)[][], filename: string) {
-  const ws = XLSX.utils.aoa_to_sheet([headers, ...rows]);
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, "Данные");
-
-  // Auto-size columns
-  const colWidths = headers.map((h, i) => {
-    const maxLen = Math.max(h.length, ...rows.map((r) => String(r[i] ?? "").length));
-    return { wch: Math.min(Math.max(maxLen + 2, 10), 50) };
+  const data: SheetData = [
+    headers.map(safeExcelText),
+    ...rows.map((row) => row.map((value) => (typeof value === "string" ? safeExcelText(value) : value))),
+  ];
+  const columns = headers.map((header, index) => {
+    const maxLength = Math.max(header.length, ...rows.map((row) => String(row[index] ?? "").length));
+    return { width: Math.min(Math.max(maxLength + 2, 10), 50) };
   });
-  ws["!cols"] = colWidths;
 
-  XLSX.writeFile(wb, `${filename}.xlsx`);
+  return writeXlsxFile(data, { sheet: "Данные", columns }).toFile(`${safeFilename(filename)}.xlsx`);
 }

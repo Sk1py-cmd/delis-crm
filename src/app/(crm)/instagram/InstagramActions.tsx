@@ -99,6 +99,7 @@ export function InstagramActions() {
                   {media[0].kind === "video" ? (
                     <video src={media[0].url} className="w-full aspect-square object-cover" muted controls />
                   ) : (
+                    // eslint-disable-next-line @next/next/no-img-element
                     <img src={media[0].url} alt="" className="w-full aspect-square object-cover" />
                   )}
                   <div className="p-3 text-xs text-white whitespace-pre-line line-clamp-4">

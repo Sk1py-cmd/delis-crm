@@ -52,6 +52,7 @@ export const SOURCE_LABEL: Record<string, string> = {
   instagram: "Instagram",
   facebook: "Facebook",
   agent: "Агент",
+  crm: "CRM",
 };
 
 export const ROLE_LABEL: Record<string, string> = {

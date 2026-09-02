@@ -1,9 +1,11 @@
+import { requireAccess } from "@/server/guard";
 import { getActivity, getOrdersLite } from "@/server/queries";
 import { NotificationsClient } from "./NotificationsClient";
 
 export const dynamic = "force-dynamic";
 
 export default async function NotificationsPage() {
+  await requireAccess("/notifications");
   const [activity, orders] = await Promise.all([getActivity(), getOrdersLite()]);
 
   const items = [
@@ -32,7 +34,7 @@ export default async function NotificationsPage() {
       channel: "push",
       status: "delivered",
       color: "#f97316",
-      at: new Date(Date.now() - 3600e3).toISOString(),
+      at: "2026-09-01T08:00:00.000Z",
     },
     {
       id: "w2",
@@ -41,7 +43,7 @@ export default async function NotificationsPage() {
       channel: "email",
       status: "sent",
       color: "#3b82f6",
-      at: new Date(Date.now() - 7200e3).toISOString(),
+      at: "2026-09-01T07:00:00.000Z",
     },
   ].sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime());
 

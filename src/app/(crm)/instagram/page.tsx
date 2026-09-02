@@ -1,3 +1,4 @@
+import { requireAccess } from "@/server/guard";
 import { getContent, getProducts } from "@/server/queries";
 import { Card, PageHeader, Badge, Progress } from "@/shared/ui/kit";
 import { StatGrid } from "@/widgets/StatCard";
@@ -17,6 +18,7 @@ const PLAN = [
 ];
 
 export default async function InstagramPage() {
+  await requireAccess("/instagram");
   const [blocks, products] = await Promise.all([getContent("instagram"), getProducts()]);
 
   return (

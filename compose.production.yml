@@ -1,0 +1,79 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: delis_crm
+      POSTGRES_USER: delis
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?Set a URL-safe POSTGRES_PASSWORD in .env.production}"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U delis -d delis_crm"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks:
+      - internal
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "postgresql://delis:${POSTGRES_PASSWORD:?Set a URL-safe POSTGRES_PASSWORD in .env.production}@db:5432/delis_crm"
+      OWNER_LOGIN: "${OWNER_LOGIN:?Set OWNER_LOGIN in .env.production}"
+      OWNER_PASSWORD: "${OWNER_PASSWORD:?Set OWNER_PASSWORD in .env.production}"
+      OWNER_NAME: "${OWNER_NAME:-Owner}"
+      OWNER_EMAIL: "${OWNER_EMAIL:-}"
+      TWO_FACTOR_ENCRYPTION_KEY: "${TWO_FACTOR_ENCRYPTION_KEY:?Set TWO_FACTOR_ENCRYPTION_KEY in .env.production}"
+      SEED_DEMO_DATA: "false"
+    expose:
+      - "3000"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - internal
+      - edge
+
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_started
+    environment:
+      DOMAIN: "${DOMAIN:?Set DOMAIN in .env.production}"
+      ACME_EMAIL: "${ACME_EMAIL:?Set ACME_EMAIL in .env.production}"
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    networks:
+      - edge
+
+volumes:
+  postgres_data:
+  caddy_data:
+  caddy_config:
+
+networks:
+  internal:
+    internal: true
+  edge:

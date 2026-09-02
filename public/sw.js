@@ -1,33 +1,51 @@
-const CACHE = "delis-crm-v1";
-const PRECACHE = ["/", "/login"];
+const CACHE = "delis-static-v3";
+const PRECACHE = ["/manifest.json", "/manifest-agent.json", "/icon-192.png", "/icon-512.png"];
 
-self.addEventListener("install", (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(PRECACHE)));
+self.addEventListener("install", (event) => {
+  event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(PRECACHE)));
   self.skipWaiting();
 });
 
-self.addEventListener("activate", (e) => {
-  e.waitUntil(
-    caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
+self.addEventListener("activate", (event) => {
+  event.waitUntil(
+    caches.keys().then((keys) => Promise.all(keys.filter((key) => key !== CACHE).map((key) => caches.delete(key))))
   );
   self.clients.claim();
 });
 
-self.addEventListener("fetch", (e) => {
-  const req = e.request;
-  if (req.method !== "GET") return;
-  if (!req.url.startsWith(self.location.origin)) return;
-  if (req.url.includes("/api/")) return;
+function isSafeStaticRequest(request, url) {
+  if (request.method !== "GET" || url.origin !== self.location.origin) return false;
+  if (url.pathname.startsWith("/api/")) return false;
+  return request.destination === "style"
+    || request.destination === "script"
+    || request.destination === "font"
+    || request.destination === "image"
+    || request.destination === "manifest"
+    || url.pathname.startsWith("/_next/static/")
+    || url.pathname === "/manifest.json"
+    || url.pathname === "/manifest-agent.json";
+}
 
-  e.respondWith(
-    fetch(req)
-      .then((res) => {
-        if (res && res.status === 200 && res.type === "basic") {
-          const copy = res.clone();
-          caches.open(CACHE).then((c) => c.put(req, copy));
-        }
-        return res;
-      })
-      .catch(() => caches.match(req).then((r) => r || caches.match("/")))
+self.addEventListener("fetch", (event) => {
+  const request = event.request;
+  const url = new URL(request.url);
+
+  // Never cache or synthesize navigation responses. Authentication-sensitive CRM
+  // HTML/RSC payloads must not survive sign-out or become visible to another user.
+  // The already-loaded agent UI keeps its fieldwork queue in IndexedDB instead.
+  if (request.mode === "navigate" || !isSafeStaticRequest(request, url)) return;
+
+  event.respondWith(
+    caches.match(request).then((cached) => {
+      const network = fetch(request)
+        .then((response) => {
+          if (response && response.ok && response.type === "basic") {
+            caches.open(CACHE).then((cache) => cache.put(request, response.clone()));
+          }
+          return response;
+        })
+        .catch(() => cached || Response.error());
+      return cached || network;
+    })
   );
 });

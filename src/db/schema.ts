@@ -63,6 +63,9 @@ export const customers = pgTable("customers", {
   isVip: boolean("is_vip").notNull().default(false),
   bonus: integer("bonus").notNull().default(0),
   tags: jsonb("tags").$type<string[]>().notNull().default([]),
+  /** Marketing is opt-in: automations and outbound campaigns must honour this flag. */
+  marketingConsent: boolean("marketing_consent").notNull().default(false),
+  marketingConsentAt: timestamp("marketing_consent_at"),
   notes: text("notes").notNull().default(""),
   ordersCount: integer("orders_count").notNull().default(0),
   totalSpent: numeric("total_spent").notNull().default("0"),
@@ -78,6 +81,8 @@ export const orders = pgTable("orders", {
   status: text("status").notNull().default("new"),
   channel: text("channel").notNull().default("miniapp"),
   payment: text("payment").notNull().default("click"),
+  /** Client mutation id used to make offline agent-order replay idempotent. */
+  syncKey: text("sync_key"),
   total: numeric("total").notNull().default("0"),
   profit: numeric("profit").notNull().default("0"),
   comment: text("comment").notNull().default(""),
@@ -147,27 +152,126 @@ export const tasks = pgTable("tasks", {
   id: serial("id").primaryKey(),
   title: text("title").notNull(),
   description: text("description").notNull().default(""),
+  /** Human-readable snapshots remain useful if an employee account is later removed. */
   assignee: text("assignee").notNull().default(""),
+  assigneeUserId: integer("assignee_user_id"),
   priority: text("priority").notNull().default("mid"), // high | mid | low
   status: text("status").notNull().default("todo"), // todo | in_progress | done
-  linkType: text("link_type").notNull().default(""), // order | customer | agent | supplier
+  linkType: text("link_type").notNull().default(""), // order | customer | agent | supplier | approval
   linkLabel: text("link_label").notNull().default(""),
   dueAt: timestamp("due_at"),
+  completedAt: timestamp("completed_at"),
   createdBy: text("created_by").notNull().default(""),
+  createdByUserId: integer("created_by_user_id"),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 
+/** Owner-maintained operational profile for a staff member; credentials stay on users. */
+export const employeeProfiles = pgTable("employee_profiles", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id").notNull().unique(),
+  position: text("position").notNull().default(""),
+  department: text("department").notNull().default(""),
+  phone: text("phone").notNull().default(""),
+  hireDate: timestamp("hire_date"),
+  notes: text("notes").notNull().default(""),
+  avatarColor: text("avatar_color").notNull().default("#64748b"),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+
+/** A target/fact KPI row is unique for each employee, metric, and calendar month. */
+export const employeeKpis = pgTable("employee_kpis", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id").notNull(),
+  period: text("period").notNull(), // YYYY-MM
+  metric: text("metric").notNull(), // sales | tasks | visits | quality
+  label: text("label").notNull().default(""),
+  target: numeric("target").notNull().default("0"),
+  actual: numeric("actual").notNull().default("0"),
+  unit: text("unit").notNull().default(""),
+  note: text("note").notNull().default(""),
+  updatedByUserId: integer("updated_by_user_id"),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+
+/** A lightweight, auditable operational approval request. */
+export const approvals = pgTable("approvals", {
+  id: serial("id").primaryKey(),
+  title: text("title").notNull(),
+  description: text("description").notNull().default(""),
+  type: text("type").notNull().default("other"),
+  priority: text("priority").notNull().default("normal"),
+  status: text("status").notNull().default("pending"), // pending | approved | rejected | cancelled
+  requesterUserId: integer("requester_user_id"),
+  requesterName: text("requester_name").notNull().default(""),
+  reviewerUserId: integer("reviewer_user_id"),
+  reviewerName: text("reviewer_name").notNull().default(""),
+  relatedTaskId: integer("related_task_id"),
+  amount: numeric("amount").notNull().default("0"),
+  decisionNote: text("decision_note").notNull().default(""),
+  dueAt: timestamp("due_at"),
+  reviewedAt: timestamp("reviewed_at"),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+
+/** One planned field route per agent and calendar day. */
+export const agentRoutes = pgTable("agent_routes", {
+  id: serial("id").primaryKey(),
+  agentId: integer("agent_id").notNull(),
+  routeDate: text("route_date").notNull(), // YYYY-MM-DD in the operating timezone
+  title: text("title").notNull().default(""),
+  notes: text("notes").notNull().default(""),
+  status: text("status").notNull().default("planned"), // planned | in_progress | completed | cancelled
+  assignedByUserId: integer("assigned_by_user_id"),
+  assignedByName: text("assigned_by_name").notNull().default(""),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+
+/** Ordered stops of an agent route. Visit links are retained for the field history. */
+export const agentRouteStops = pgTable("agent_route_stops", {
+  id: serial("id").primaryKey(),
+  routeId: integer("route_id").notNull(),
+  sequence: integer("sequence").notNull().default(1),
+  storeName: text("store_name").notNull(),
+  storeAddress: text("store_address").notNull().default(""),
+  plannedLatitude: numeric("planned_latitude"),
+  plannedLongitude: numeric("planned_longitude"),
+  status: text("status").notNull().default("planned"), // planned | visited | skipped
+  visitId: integer("visit_id"),
+  notes: text("notes").notNull().default(""),
+  completedAt: timestamp("completed_at"),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+
+/** GPS-verifiable field visit. Legacy gpsCoords/photos remain as history-compatible snapshots. */
 export const agentVisits = pgTable("agent_visits", {
   id: serial("id").primaryKey(),
   agentId: integer("agent_id").notNull(),
+  routeId: integer("route_id"),
+  routeStopId: integer("route_stop_id"),
   storeName: text("store_name").notNull(),
   storeAddress: text("store_address").notNull().default(""),
-  gpsCoords: text("gps_coords").notNull().default("41.2858, 69.2035"),
+  gpsCoords: text("gps_coords").notNull().default(""),
+  latitude: numeric("latitude"),
+  longitude: numeric("longitude"),
+  accuracyMeters: numeric("accuracy_meters"),
+  locationCapturedAt: timestamp("location_captured_at"),
   status: text("status").notNull().default("order_placed"), // order_placed | completed | no_order
   orderTotal: numeric("order_total").notNull().default("0"),
   notes: text("notes").notNull().default(""),
   photos: jsonb("photos").$type<string[]>().notNull().default([]),
+  source: text("source").notNull().default("online"), // online | offline
+  syncKey: text("sync_key"), // client mutation id for idempotent offline replay
+  recordedByUserId: integer("recorded_by_user_id"),
+  recordedByName: text("recorded_by_name").notNull().default(""),
   visitedAt: timestamp("visited_at").notNull().defaultNow(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 
 export const transactions = pgTable("transactions", {
@@ -176,6 +280,13 @@ export const transactions = pgTable("transactions", {
   category: text("category").notNull().default("sales"),
   account: text("account").notNull().default("click"),
   amount: numeric("amount").notNull().default("0"),
+  /** Links automatic revenue, purchase, and refund postings to their source document. */
+  referenceType: text("reference_type").notNull().default(""),
+  referenceId: integer("reference_id"),
+  /** Sales/marketing attribution; empty means deliberately unallocated. */
+  channel: text("channel").notNull().default(""),
+  actorUserId: integer("actor_user_id"),
+  actorName: text("actor_name").notNull().default(""),
   note: text("note").notNull().default(""),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
@@ -196,11 +307,94 @@ export const templates = pgTable("templates", {
   body: text("body").notNull(),
 });
 
+/** A physical storage location. One active default warehouse is used by legacy flows. */
+export const warehouses = pgTable("warehouses", {
+  id: serial("id").primaryKey(),
+  code: text("code").notNull().unique(),
+  name: text("name").notNull(),
+  city: text("city").notNull().default(""),
+  address: text("address").notNull().default(""),
+  isDefault: boolean("is_default").notNull().default(false),
+  status: text("status").notNull().default("active"), // active | inactive
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+});
+
+/** Physical and reserved quantities are tracked separately per product and warehouse. */
+/** Idempotent markers for compatibility data cutovers. */
+export const inventoryMigrations = pgTable("inventory_migrations", {
+  key: text("key").primaryKey(),
+  appliedAt: timestamp("applied_at").notNull().defaultNow(),
+});
+
+export const warehouseStocks = pgTable("warehouse_stocks", {
+  id: serial("id").primaryKey(),
+  warehouseId: integer("warehouse_id").notNull(),
+  productId: integer("product_id").notNull(),
+  onHand: integer("on_hand").notNull().default(0),
+  reserved: integer("reserved").notNull().default(0),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+});
+
+/** A hold on sellable stock; it can later be released or fulfilled against an order. */
+export const stockReservations = pgTable("stock_reservations", {
+  id: serial("id").primaryKey(),
+  orderId: integer("order_id"),
+  warehouseId: integer("warehouse_id").notNull(),
+  productId: integer("product_id").notNull(),
+  qty: integer("qty").notNull(),
+  status: text("status").notNull().default("active"), // active | released | fulfilled | expired
+  reason: text("reason").notNull().default(""),
+  expiresAt: timestamp("expires_at"),
+  releasedAt: timestamp("released_at"),
+  createdByUserId: integer("created_by_user_id"),
+  createdByName: text("created_by_name").notNull().default(""),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+
+/** A counted inventory session retains its system snapshot and all line-level differences. */
+export const inventoryCounts = pgTable("inventory_counts", {
+  id: serial("id").primaryKey(),
+  warehouseId: integer("warehouse_id").notNull(),
+  number: text("number").notNull(),
+  title: text("title").notNull().default(""),
+  status: text("status").notNull().default("draft"), // draft | counting | posted | cancelled
+  notes: text("notes").notNull().default(""),
+  startedByUserId: integer("started_by_user_id"),
+  startedByName: text("started_by_name").notNull().default(""),
+  postedByUserId: integer("posted_by_user_id"),
+  postedByName: text("posted_by_name").notNull().default(""),
+  startedAt: timestamp("started_at"),
+  postedAt: timestamp("posted_at"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+});
+
+export const inventoryCountLines = pgTable("inventory_count_lines", {
+  id: serial("id").primaryKey(),
+  inventoryCountId: integer("inventory_count_id").notNull(),
+  productId: integer("product_id").notNull(),
+  systemQty: integer("system_qty").notNull().default(0),
+  countedQty: integer("counted_qty"),
+  difference: integer("difference"),
+  note: text("note").notNull().default(""),
+  countedByUserId: integer("counted_by_user_id"),
+  countedAt: timestamp("counted_at"),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+});
+
+/** Immutable stock ledger. Legacy rows may omit the newer warehouse/reference metadata. */
 export const stockMoves = pgTable("stock_moves", {
   id: serial("id").primaryKey(),
   productId: integer("product_id").notNull(),
-  kind: text("kind").notNull(), // in | out | transfer | writeoff
+  warehouseId: integer("warehouse_id"),
+  kind: text("kind").notNull(), // receipt | issue | transfer_* | writeoff | adjustment_* | reserve | release
   qty: integer("qty").notNull().default(0),
+  balanceAfter: integer("balance_after"),
+  referenceType: text("reference_type").notNull().default(""),
+  referenceId: integer("reference_id"),
+  actorUserId: integer("actor_user_id"),
+  actorName: text("actor_name").notNull().default(""),
   note: text("note").notNull().default(""),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
@@ -212,18 +406,35 @@ export const users = pgTable("users", {
   email: text("email").notNull().default(""),
   role: text("role").notNull().default("manager"),
   status: text("status").notNull().default("active"),
-  lastIp: text("last_ip").notNull().default("94.158.0.1"),
-  device: text("device").notNull().default("MacBook Pro · Chrome"),
+  lastIp: text("last_ip").notNull().default(""),
+  device: text("device").notNull().default(""),
+  /** TOTP is available only to the singleton Owner. */
   twoFa: boolean("two_fa").notNull().default(false),
+  /** AES-256-GCM encrypted TOTP secret; plaintext never reaches the database. */
+  twoFaSecretEncrypted: text("two_fa_secret_encrypted").notNull().default(""),
+  twoFaEnabledAt: timestamp("two_fa_enabled_at"),
+  /** Marks that the singleton Owner was initialized from OWNER_LOGIN/OWNER_PASSWORD. */
+  ownerInitializedAt: timestamp("owner_initialized_at"),
+  /** Linked employee profile for the Agent portal; one CRM user can own one agent profile. */
+  agentId: integer("agent_id").unique(),
   passwordHash: text("password_hash").notNull().default(""),
   lastLoginAt: timestamp("last_login_at").notNull().defaultNow(),
 });
 
 export const activity = pgTable("activity", {
   id: serial("id").primaryKey(),
+  /** Nullable for system-generated security events such as a throttled login. */
+  actorUserId: integer("actor_user_id"),
   actor: text("actor").notNull(),
   action: text("action").notNull(),
   entity: text("entity").notNull().default(""),
+  entityType: text("entity_type").notNull().default(""),
+  entityId: integer("entity_id"),
+  eventType: text("event_type").notNull().default("business"),
+  severity: text("severity").notNull().default("info"),
+  ip: text("ip").notNull().default(""),
+  /** Never store passwords, session tokens, or integration secrets in this payload. */
+  metadata: jsonb("metadata").$type<Record<string, string | number | boolean | null>>().notNull().default({}),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 
@@ -232,7 +443,40 @@ export const sessions = pgTable("sessions", {
   token: text("token").notNull().unique(),
   userId: integer("user_id").notNull(),
   device: text("device").notNull().default(""),
+  ip: text("ip").notNull().default(""),
   expiresAt: timestamp("expires_at").notNull(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+
+/** Short-lived proof that password verification passed and a TOTP code is now required. */
+export const twoFactorChallenges = pgTable("two_factor_challenges", {
+  id: serial("id").primaryKey(),
+  tokenHash: text("token_hash").notNull().unique(),
+  /** Enforces exactly one active password-to-factor challenge per user. */
+  userId: integer("user_id").notNull().unique(),
+  attempts: integer("attempts").notNull().default(0),
+  expiresAt: timestamp("expires_at").notNull(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+
+/** Pending, password-reauthenticated enrollment. The TOTP secret is encrypted at rest. */
+export const twoFactorEnrollments = pgTable("two_factor_enrollments", {
+  id: serial("id").primaryKey(),
+  tokenHash: text("token_hash").notNull().unique(),
+  /** Replacing enrollment is atomic, so one Owner cannot hold parallel QR secrets. */
+  userId: integer("user_id").notNull().unique(),
+  secretEncrypted: text("secret_encrypted").notNull(),
+  attempts: integer("attempts").notNull().default(0),
+  expiresAt: timestamp("expires_at").notNull(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+
+/** One-time Owner recovery codes are kept only as keyed hashes. */
+export const twoFactorBackupCodes = pgTable("two_factor_backup_codes", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id").notNull(),
+  codeHash: text("code_hash").notNull(),
+  usedAt: timestamp("used_at"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 
@@ -263,10 +507,20 @@ export const broadcasts = pgTable("broadcasts", {
   body: text("body").notNull().default(""),
   recipients: integer("recipients").notNull().default(0),
   channel: text("channel").notNull().default("telegram"),
-  status: text("status").notNull().default("sent"), // draft | scheduled | sent
+  status: text("status").notNull().default("queued"), // draft | scheduled | queued | delivered | failed
   scheduledAt: timestamp("scheduled_at"),
   sentAt: timestamp("sent_at").notNull().defaultNow(),
   createdBy: text("created_by").notNull().default(""),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+
+/** Immutable recipient snapshot: outbound marketing must remain consent-auditable. */
+export const broadcastRecipients = pgTable("broadcast_recipients", {
+  id: serial("id").primaryKey(),
+  broadcastId: integer("broadcast_id").notNull(),
+  customerId: integer("customer_id").notNull(),
+  channel: text("channel").notNull().default("telegram"),
+  status: text("status").notNull().default("queued"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 
@@ -293,6 +547,8 @@ export const purchaseOrders = pgTable("purchase_orders", {
   id: serial("id").primaryKey(),
   number: text("number").notNull(),
   supplierId: integer("supplier_id").notNull(),
+  /** Target warehouse is chosen before the supplier shipment is received. */
+  warehouseId: integer("warehouse_id"),
   status: text("status").notNull().default("draft"), // draft | sent | confirmed | shipped | received | cancelled
   total: numeric("total").notNull().default("0"),
   paid: numeric("paid").notNull().default("0"),
@@ -388,5 +644,16 @@ export const marketingTriggers = pgTable("marketing_triggers", {
   discountBonus: integer("discount_bonus").notNull().default(0),
   isActive: boolean("is_active").notNull().default(true),
   triggeredCount: integer("triggered_count").notNull().default(0),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+
+/** Idempotency record for consent-based customer automations. */
+export const automationRuns = pgTable("automation_runs", {
+  id: serial("id").primaryKey(),
+  triggerId: integer("trigger_id").notNull(),
+  customerId: integer("customer_id").notNull(),
+  eventKey: text("event_key").notNull(),
+  actionType: text("action_type").notNull().default("discount_message"),
+  status: text("status").notNull().default("queued"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });

@@ -47,6 +47,8 @@ export interface PurchaseLite {
   number: string;
   supplierId: number;
   supplierName: string | null;
+  warehouseId: number | null;
+  warehouseName: string | null;
   status: string;
   total: string;
   paid: string;
@@ -54,6 +56,13 @@ export interface PurchaseLite {
   receivedAt: string | null;
   notes: string;
   createdAt: string;
+}
+
+export interface WarehouseLite {
+  id: number;
+  code: string;
+  name: string;
+  isDefault: boolean;
 }
 
 export interface LowStockLite {
@@ -85,10 +94,12 @@ const CATEGORY: Record<string, { label: string; icon: string; color: string }> =
 export function SuppliersClient({
   suppliers,
   orders,
+  warehouses,
   lowStock,
 }: {
   suppliers: SupplierLite[];
   orders: PurchaseLite[];
+  warehouses: WarehouseLite[];
   lowStock: LowStockLite[];
 }) {
   const [tab, setTab] = useState("suppliers");
@@ -96,6 +107,7 @@ export function SuppliersClient({
   const [supModal, setSupModal] = useState(false);
   const [poModal, setPoModal] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [todayTs] = useState(() => Date.now());
   const [supForm, setSupForm] = useState({
     name: "",
     contactPerson: "",
@@ -107,6 +119,7 @@ export function SuppliersClient({
   });
   const [poForm, setPoForm] = useState({
     supplierId: String(suppliers[0]?.id ?? ""),
+    warehouseId: String(warehouses.find((warehouse) => warehouse.isDefault)?.id ?? warehouses[0]?.id ?? ""),
     notes: "",
     items: [] as { productId: number; qty: number }[],
   });
@@ -159,6 +172,10 @@ export function SuppliersClient({
   };
 
   const createPO = async () => {
+    if (!poForm.warehouseId) {
+      toast("Выберите склад приёмки", "err");
+      return;
+    }
     if (poForm.items.length === 0) {
       toast("Добавьте позиции в закупку", "err");
       return;
@@ -169,10 +186,16 @@ export function SuppliersClient({
         supplierId: Number(poForm.supplierId),
         items: poForm.items,
         notes: poForm.notes,
+        warehouseId: Number(poForm.warehouseId) || undefined,
       });
       toast(`Закупка ${(res as { number?: string }).number ?? ""} создана и отправлена поставщику`);
       setPoModal(false);
-      setPoForm({ supplierId: String(suppliers[0]?.id ?? ""), notes: "", items: [] });
+      setPoForm({
+        supplierId: String(suppliers[0]?.id ?? ""),
+        warehouseId: String(warehouses.find((warehouse) => warehouse.isDefault)?.id ?? warehouses[0]?.id ?? ""),
+        notes: "",
+        items: [],
+      });
       setTab("orders");
       router.refresh();
     } catch (e) {
@@ -378,6 +401,7 @@ export function SuppliersClient({
                 <tr>
                   <th>Номер</th>
                   <th>Поставщик</th>
+                  <th>Склад</th>
                   <th>Сумма</th>
                   <th className="hidden md:table-cell">Ожидается</th>
                   <th>Статус</th>
@@ -389,11 +413,12 @@ export function SuppliersClient({
                 {orders.map((o) => {
                   const st = PO_STATUS[o.status] ?? PO_STATUS.draft;
                   const isLate =
-                    o.expectedAt && !o.receivedAt && new Date(o.expectedAt).getTime() < Date.now();
+                    o.expectedAt && !o.receivedAt && new Date(o.expectedAt).getTime() < todayTs;
                   return (
                     <tr key={o.id}>
                       <td className="font-semibold">{o.number}</td>
                       <td className="truncate max-w-[200px]">{o.supplierName ?? "—"}</td>
+                      <td className="muted whitespace-nowrap">{o.warehouseName ?? "Основной склад"}</td>
                       <td className="font-semibold whitespace-nowrap">{money(o.total)}</td>
                       <td className="muted hidden md:table-cell whitespace-nowrap">
                         {o.expectedAt ? dateOnly(o.expectedAt) : "—"}
@@ -423,7 +448,7 @@ export function SuppliersClient({
                 })}
                 {orders.length === 0 && (
                   <tr>
-                    <td colSpan={7} className="muted text-center py-8">
+                    <td colSpan={8} className="muted text-center py-8">
                       Закупок пока нет — создайте первую
                     </td>
                   </tr>
@@ -471,6 +496,18 @@ export function SuppliersClient({
                   </option>
                 ))}
               </select>
+            </div>
+
+            <div>
+              <label className="text-xs muted uppercase tracking-wider">Склад приёмки</label>
+              <select className="input mt-1.5" value={poForm.warehouseId} onChange={(e) => setPoForm({ ...poForm, warehouseId: e.target.value })}>
+                {warehouses.map((warehouse) => (
+                  <option key={warehouse.id} value={warehouse.id}>
+                    {warehouse.code} · {warehouse.name}{warehouse.isDefault ? " · основной" : ""}
+                  </option>
+                ))}
+              </select>
+              {!warehouses.length && <p className="text-xs mt-1" style={{ color: "var(--error)" }}>Нет активного склада для приёмки.</p>}
             </div>
 
             <div>
@@ -541,7 +578,7 @@ export function SuppliersClient({
 
             <input className="input" placeholder="Комментарий к закупке" value={poForm.notes} onChange={(e) => setPoForm({ ...poForm, notes: e.target.value })} />
 
-            <button className="btn btn-primary justify-center" disabled={busy} onClick={createPO}>
+            <button className="btn btn-primary justify-center" disabled={busy || !warehouses.length} onClick={createPO}>
               {busy ? "Создаём…" : `Создать закупку · ${poForm.items.length} позиций`}
             </button>
             <p className="text-xs muted text-center">

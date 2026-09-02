@@ -1,12 +1,15 @@
+import { requireAccess } from "@/server/guard";
 import { getCustomers } from "@/server/queries";
 import { CustomersClient } from "./CustomersClient";
 
 export const dynamic = "force-dynamic";
 
 export default async function CustomersPage() {
+  await requireAccess("/customers");
   const rows = await getCustomers();
   return (
     <CustomersClient
+      referenceAt={new Date().toISOString()}
       customers={rows.map((c) => ({
         id: c.id,
         firstName: c.firstName,
@@ -18,6 +21,7 @@ export default async function CustomersPage() {
         source: c.source,
         isVip: c.isVip,
         bonus: c.bonus,
+        marketingConsent: c.marketingConsent,
         ordersCount: c.ordersCount,
         totalSpent: c.totalSpent,
         createdAt: String(c.createdAt),

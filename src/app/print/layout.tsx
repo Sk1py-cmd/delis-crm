@@ -1,19 +1,18 @@
-import { redirect } from "next/navigation";
-import { getSessionUser } from "@/server/auth";
+import { requireAccess } from "@/server/guard";
 
 export const dynamic = "force-dynamic";
 
+/** Printable order documents are subject to the same order-access policy as the CRM. */
 export default async function PrintLayout({ children }: { children: React.ReactNode }) {
-  const user = await getSessionUser();
-  if (!user) redirect("/");
+  await requireAccess("/orders");
 
   return (
     <div
       style={{
-        background: "#fff",
-        color: "#111",
         minHeight: "100vh",
-        colorScheme: "light",
+        background: "white",
+        color: "#1a1a1a",
+        fontFamily: "Arial, sans-serif",
       }}
     >
       {children}

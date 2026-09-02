@@ -24,6 +24,7 @@ export async function sendPushNotification(input: {
   try {
     await fetch("/api/manage", {
       method: "POST",
+      credentials: "same-origin",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         action: "sendPush",

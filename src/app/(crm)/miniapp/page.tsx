@@ -1,3 +1,4 @@
+import { requireAccess } from "@/server/guard";
 import { getContent, getProducts } from "@/server/queries";
 import { Card, PageHeader, Badge } from "@/shared/ui/kit";
 import { money } from "@/shared/lib/format";
@@ -7,6 +8,7 @@ import { MiniAppActions } from "./MiniAppActions";
 export const dynamic = "force-dynamic";
 
 export default async function MiniAppPage() {
+  await requireAccess("/miniapp");
   const [blocks, products] = await Promise.all([getContent("miniapp"), getProducts()]);
   const featured = products.slice(0, 4);
 

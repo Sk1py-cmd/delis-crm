@@ -15,7 +15,7 @@ import { MediaUploader, MediaPreview, type MediaFile } from "@/shared/ui/MediaUp
 
 interface C {
   id: number; name: string; firstName: string; username: string; city: string;
-  source: string; isVip: boolean; bonus: number; ordersCount: number;
+  source: string; isVip: boolean; bonus: number; marketingConsent: boolean; ordersCount: number;
   totalSpent: number; lastActiveAt: string;
 }
 interface T { id: number; title: string; body: string; }
@@ -80,6 +80,7 @@ export function BroadcastClient({
         (c) =>
           (city === "all" || c.city === city) &&
           (source === "all" || c.source === source) &&
+          c.marketingConsent &&
           (!vip || c.isVip) &&
           c.ordersCount >= minOrders &&
           c.totalSpent >= minSpent,
@@ -162,12 +163,12 @@ export function BroadcastClient({
       return;
     }
     setSending(true); setDone(false); setProgress(0);
-    const status = sendMode === "schedule" ? "scheduled" : "sent";
+    const status = sendMode === "schedule" ? "scheduled" : "queued";
     try {
       await postManage("sendBroadcast", {
         title: text.slice(0, 60),
         body: text,
-        recipients: audience.length,
+        recipientIds: audience.map((customer) => customer.id),
         channel,
         status,
         scheduledAt: sendMode === "schedule" ? scheduleTime : null,
@@ -179,22 +180,15 @@ export function BroadcastClient({
       setSending(false);
       return;
     }
-    const iv = setInterval(() => {
-      setProgress((p) => {
-        if (p >= 100) {
-          clearInterval(iv);
-          setSending(false); setDone(true);
-          toast(
-            sendMode === "schedule"
-              ? `Рассылка запланирована на ${dt(scheduleTime)}`
-              : `Рассылка отправлена ${audience.length} клиентам`,
-          );
-          router.refresh();
-          return 100;
-        }
-        return p + 4;
-      });
-    }, 50);
+    setSending(false);
+    setDone(true);
+    setProgress(100);
+    toast(
+      sendMode === "schedule"
+        ? `Рассылка запланирована на ${dt(scheduleTime)}`
+        : `Рассылка поставлена в очередь для ${audience.length} клиентов`,
+    );
+    router.refresh();
   };
 
   const toggle = (a: string) => setAttach((s) => (s.includes(a) ? s.filter((x) => x !== a) : [...s, a]));
@@ -203,7 +197,7 @@ export function BroadcastClient({
     <>
       <PageHeader
         title="Массовые рассылки"
-        subtitle="Персональные кампании в Telegram Bot, Mini App и Push — с шаблонами, сегментацией и расписанием"
+        subtitle="Персональные кампании в Telegram Bot и Mini App — только для клиентов с подтверждённым согласием"
         actions={
           <>
             <Badge color="var(--primary)"><Users size={12} /> Получат: {num(audience.length)}</Badge>
@@ -216,7 +210,7 @@ export function BroadcastClient({
         {/* ===== КОЛОНКА 1: АУДИТОРИЯ ===== */}
         <Card hover={false} className="self-start">
           <h3 className="font-semibold mb-1 flex items-center gap-2"><Users size={16} /> Аудитория</h3>
-          <p className="muted text-xs mb-3">Выберите, кому отправить</p>
+          <p className="muted text-xs mb-3">В выборку автоматически попадают только клиенты с согласием на маркетинг.</p>
 
           <div className="flex flex-col gap-1.5 mb-4">
             {PRESETS.map((p) => (
@@ -379,7 +373,7 @@ export function BroadcastClient({
           </Card>
 
           <Card hover={false}>
-            <h3 className="font-semibold mb-3 flex items-center gap-2"><Send size={16} /> Отправка</h3>
+            <h3 className="font-semibold mb-3 flex items-center gap-2"><Send size={16} /> Постановка в очередь</h3>
             <div className="flex flex-col gap-3">
               <div>
                 <label className="text-xs muted">Канал</label>
@@ -403,7 +397,7 @@ export function BroadcastClient({
 
               <motion.button whileTap={{ scale: 0.97 }} className="btn btn-primary justify-center !py-3" disabled={sending || audience.length === 0} onClick={send}>
                 {sending ? <RefreshCw size={16} className="animate-spin" /> : sendMode === "schedule" ? <CalendarClock size={16} /> : <Send size={16} />}
-                {sending ? "Отправляем…" : sendMode === "schedule" ? "Запланировать" : `Отправить ${num(audience.length)} клиентам`}
+                {sending ? "Сохраняем…" : sendMode === "schedule" ? "Запланировать" : `Поставить в очередь: ${num(audience.length)}`}
               </motion.button>
 
               <AnimatePresence>
@@ -411,7 +405,7 @@ export function BroadcastClient({
                   <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} exit={{ opacity: 0, height: 0 }}>
                     <Progress value={progress} color={done ? "#22c55e" : "var(--primary)"} />
                     <div className="text-xs muted mt-2">
-                      {done ? "✅ Готово" : `Обработано ${Math.round((progress / 100) * audience.length)} из ${num(audience.length)}`}
+                      {done ? (sendMode === "schedule" ? "✅ Запланировано" : "✅ Поставлено в очередь") : "Сохраняем кампанию…"}
                     </div>
                   </motion.div>
                 )}
@@ -436,7 +430,7 @@ export function BroadcastClient({
                 <th>Получатели</th>
                 <th className="hidden md:table-cell">Автор</th>
                 <th>Статус</th>
-                <th className="hidden lg:table-cell">Отправлена</th>
+                <th className="hidden lg:table-cell">Создана</th>
               </tr>
             </thead>
             <tbody>
@@ -450,7 +444,7 @@ export function BroadcastClient({
                   <td className="font-semibold">{num(h.recipients)}</td>
                   <td className="muted hidden md:table-cell">{h.createdBy}</td>
                   <td>
-                    {h.status === "sent" ? <Badge color="#22c55e">Отправлена</Badge> : <Badge color="#f97316">Запланирована</Badge>}
+                    {h.status === "scheduled" ? <Badge color="#3b82f6">Запланирована</Badge> : h.status === "delivered" ? <Badge color="#22c55e">Доставлена</Badge> : <Badge color="#f97316">В очереди</Badge>}
                   </td>
                   <td className="muted hidden lg:table-cell whitespace-nowrap">{dt(h.status === "scheduled" && h.scheduledAt ? h.scheduledAt : h.sentAt)}</td>
                 </tr>

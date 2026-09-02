@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { AnimatePresence, motion } from "framer-motion";
 import { Search, Bell, Sun, Moon, MonitorSmartphone, Menu, X, Plus, Languages } from "lucide-react";
 import { useTheme } from "@/shared/store/theme";
@@ -23,8 +23,9 @@ export function Topbar({ user }: { user: { name: string; login: string; email: s
   const { mode, set } = useTheme();
   const { locale, setLocale } = useLocale();
   const pathname = usePathname();
+  const router = useRouter();
   const t = useT();
-  useKeyboardShortcuts();
+  useKeyboardShortcuts(user.role);
   const current = NAV.find((n) => n.href === pathname);
   const allowedNav = navForRole(user.role);
 
@@ -65,9 +66,11 @@ export function Topbar({ user }: { user: { name: string; login: string; email: s
           </button>
 
           <div className="flex items-center gap-1 sm:gap-2 shrink-0">
-            <Link href="/orders" className="btn btn-primary hidden xl:inline-flex shrink-0">
-              <Plus size={15} /> {t("topbar.newOrder")}
-            </Link>
+            {allowedNav.some((item) => item.href === "/orders") && (
+              <Link href="/orders" className="btn btn-primary hidden xl:inline-flex shrink-0">
+                <Plus size={15} /> {t("topbar.newOrder")}
+              </Link>
+            )}
 
             {/* Язык */}
             <div className="relative shrink-0">
@@ -163,7 +166,7 @@ export function Topbar({ user }: { user: { name: string; login: string; email: s
                       style={{ color: "var(--error)" }}
                       onClick={async () => {
                         await fetch("/api/auth/logout", { method: "POST" });
-                        window.location.assign("/");
+                        router.replace("/");
                       }}
                     >
                       {t("topbar.logout")}
@@ -223,7 +226,7 @@ export function Topbar({ user }: { user: { name: string; login: string; email: s
         )}
       </AnimatePresence>
 
-      <CommandPalette open={cmd} setOpen={setCmd} />
+      <CommandPalette open={cmd} setOpen={setCmd} role={user.role} />
     </>
   );
 }

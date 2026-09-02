@@ -92,19 +92,39 @@ export function ProductsClient({ products, categories }: { products: ProductRow[
   const save = async () => {
     if (!draft) return;
     setSaving(true);
-    await fetch("/api/products", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(draft),
-    });
-    setSaving(false);
-    setDraft(null);
-    router.refresh();
+    try {
+      // Existing SKU stock is aggregate availability and is changed only by
+      // warehouse operations. A new product may still receive an opening balance.
+      const payload = draft.id ? (() => {
+        const { stock: _stock, ...product } = draft;
+        return product;
+      })() : draft;
+      const response = await fetch("/api/products", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const result = await response.json().catch(() => ({})) as { error?: string };
+      if (!response.ok) throw new Error(result.error ?? "Не удалось сохранить товар");
+      setDraft(null);
+      router.refresh();
+    } catch (error) {
+      toast(error instanceof Error ? error.message : "Не удалось сохранить товар", "err");
+    } finally {
+      setSaving(false);
+    }
   };
 
   const remove = async (id: number) => {
-    await fetch(`/api/products?id=${id}`, { method: "DELETE" });
-    router.refresh();
+    try {
+      const response = await fetch(`/api/products?id=${id}`, { method: "DELETE" });
+      const result = await response.json().catch(() => ({})) as { error?: string };
+      if (!response.ok) throw new Error(result.error ?? "Не удалось архивировать товар");
+      toast("Товар перенесён в архив; история движений сохранена");
+      router.refresh();
+    } catch (error) {
+      toast(error instanceof Error ? error.message : "Не удалось архивировать товар", "err");
+    }
   };
 
   const exportCsv = () => {
@@ -343,14 +363,21 @@ export function ProductsClient({ products, categories }: { products: ProductRow[
               </div>
               <div>
                 <label className="text-xs muted uppercase tracking-wider">{tr("products.stock")}</label>
-                <input type="number" className="input mt-1.5" value={draft.stock} onChange={(e) => setDraft({ ...draft, stock: Number(e.target.value) })} />
+                {draft.id ? (
+                  <div className="mt-1.5 rounded-xl px-3 py-2.5 text-sm" style={{ background: "rgba(var(--table-row))", border: "1px solid rgba(var(--border))" }}>
+                    <span className="font-semibold">{num(draft.stock)} шт</span>
+                    <span className="muted"> · меняется в разделе «Склад»</span>
+                  </div>
+                ) : (
+                  <input type="number" min="0" step="1" className="input mt-1.5" value={draft.stock} onChange={(e) => setDraft({ ...draft, stock: Math.max(0, Math.floor(Number(e.target.value) || 0)) })} />
+                )}
               </div>
               <div>
                 <label className="text-xs muted uppercase tracking-wider">{tr("common.status")}</label>
                 <select className="input mt-1.5" value={draft.status} onChange={(e) => setDraft({ ...draft, status: e.target.value })}>
                   <option value="active">{tr("products.active")}</option>
                   <option value="draft">{tr("products.draft")}</option>
-                  <option value="archived">{tr("products.archived")}</option>
+                  <option value="inactive">{tr("products.archived")}</option>
                 </select>
               </div>
               <div className="md:col-span-2">

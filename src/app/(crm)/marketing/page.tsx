@@ -1,9 +1,11 @@
+import { requireAccess } from "@/server/guard";
 import { getMarketingData } from "@/server/queries";
 import { MarketingClient } from "./MarketingClient";
 
 export const dynamic = "force-dynamic";
 
 export default async function MarketingPage() {
+  const user = await requireAccess("/marketing");
   const data = await getMarketingData();
 
   return (
@@ -40,9 +42,20 @@ export default async function MarketingPage() {
         status: c.status,
         createdAt: String(c.createdAt),
       }))}
+      recentRuns={data.recentRuns.map((run) => ({
+        id: run.id,
+        eventKey: run.eventKey,
+        actionType: run.actionType,
+        status: run.status,
+        createdAt: String(run.createdAt),
+        triggerTitle: run.triggerTitle,
+        customerName: `${run.customerFirstName} ${run.customerLastName}`.trim(),
+        customerSource: run.customerSource,
+      }))}
       adChannels={data.adChannels}
       totalSales={data.totalSales}
       ordersCount={data.ordersCount}
+      canRunAutomations={user.role === "owner"}
     />
   );
 }

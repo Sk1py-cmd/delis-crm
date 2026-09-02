@@ -1,0 +1,70 @@
+# DELIS CRM
+
+Enterprise CRM for DELIS, built with Next.js, PostgreSQL and Drizzle ORM.
+
+## First launch
+
+1. Copy the example configuration:
+
+   ```bash
+   cp .env.example .env
+   ```
+
+2. Set a real PostgreSQL `DATABASE_URL` and **replace** `OWNER_LOGIN` and `OWNER_PASSWORD`.
+   - Owner login: 3–24 lowercase Latin letters, digits, `.`, `_`, or `-`.
+   - Owner password: 10–128 characters.
+   - Do not commit `.env`.
+3. Install and run:
+
+   ```bash
+   npm ci
+   npm run dev
+   ```
+
+On first startup against an empty database, the CRM creates exactly one `owner` account from `OWNER_LOGIN` and `OWNER_PASSWORD`. It does **not** overwrite an Owner credential after that bootstrap is recorded. When upgrading a legacy database from the old demo bootstrap, the first startup migrates the retained Owner once to the environment-provided credential; set the variables before deploying.
+
+Demo operational data is disabled by default. Set `SEED_DEMO_DATA=true` only for a local demo database.
+
+## Deployment
+
+For a staged Docker/Caddy/PostgreSQL deployment, secret handling, readiness checks, backups, and promotion guidance, see [docs/deployment.md](docs/deployment.md).
+
+## Owner two-factor authentication
+
+Before enabling TOTP in **Security Center**, set a persistent `TWO_FACTOR_ENCRYPTION_KEY` in the deployment environment. Generate it once with `openssl rand -base64 32` and retain it securely: changing or losing this key makes encrypted TOTP secrets and recovery-code hashes unusable.
+
+The Owner can then scan the locally generated QR code with a standard TOTP app (Google Authenticator, Microsoft Authenticator, 1Password, etc.), confirm the first code, and save the one-time recovery codes. TOTP secrets are AES-256-GCM encrypted at rest; recovery codes are stored only as keyed hashes. The app never records passwords, session tokens, TOTP secrets, or recovery codes in the audit log.
+
+## Access model
+
+- Login is by login and password. There is no public registration endpoint or UI.
+- Only the Owner can create employee accounts, assign or change employee roles, block/unblock or delete employee accounts, and issue/reset passwords.
+- Admin can perform delegated business operations, but cannot create accounts or manage passwords.
+- Employees cannot change their own passwords; they request a reset from the Owner.
+- Agent accounts must be explicitly linked by the Owner to one Agent profile. The agent portal never falls back to another agent's data.
+- Role checks run on server-rendered CRM pages and API mutation/read routes. Hiding a navigation item is not considered authorization.
+
+The supported roles are `owner`, `admin`, `manager`, `warehouse`, `agent`, `support`, `moderator`, and `operator`. The centralized policy is in `src/shared/config/access.ts`.
+
+## Security notes
+
+- Passwords use salted Node.js `scrypt` hashes and constant-time verification.
+- Login attempts are limited to five failed attempts per IP/login pair in a 15-minute window. The current limiter is process-local; deploy a shared Redis/database limiter when horizontally scaling.
+- Cookie-authenticated write endpoints enforce same-origin requests.
+- Production must run behind HTTPS so secure session cookies are enabled.
+
+## Quality checks
+
+```bash
+npm run typecheck
+npm run lint
+npm audit --omit=dev --audit-level=high
+npm test
+npm run build
+```
+
+By default, `npm test` starts an isolated PostgreSQL-compatible PGlite instance through the standard `pg` driver. The runtime suite boots the real schema/seed code and verifies consent rejection, immutable broadcast recipients, automation consent gates, channel attribution, and bounded Owner reporting. It does not require local PostgreSQL or application secrets. Set both `RUN_EXTERNAL_DATABASE_TESTS=true` and `TEST_DATABASE_URL` only for an isolated test database to run the same suite against a PostgreSQL service.
+
+GitHub Actions runs the same checks on every push and pull request. It directs the runtime suite and production build to a disposable PostgreSQL service and uses a dynamically generated non-production Owner password.
+
+A reachable PostgreSQL instance and valid `DATABASE_URL` are needed to exercise login, seed, and business workflows end to end outside the automated runtime suite.

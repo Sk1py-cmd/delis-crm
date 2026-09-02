@@ -1,9 +1,11 @@
+import { requireAccess } from "@/server/guard";
 import { getChatThreads } from "@/server/queries";
 import { ChatClient } from "./ChatClient";
 
 export const dynamic = "force-dynamic";
 
 export default async function ChatPage({ searchParams }: { searchParams: Promise<{ customer?: string }> }) {
+  await requireAccess("/chat");
   const sp = await searchParams;
   const rows = await getChatThreads();
   const threads = rows.map((t) => ({

@@ -1,3 +1,4 @@
+import { requireAccess } from "@/server/guard";
 import { getCompanyOS, getDashboard, recentOrdersList, getProducts, getCustomers, getFinance } from "@/server/queries";
 import { CompanyOS } from "@/widgets/CompanyOS";
 import { Card, PageHeader, Badge, Avatar, Progress } from "@/shared/ui/kit";
@@ -7,6 +8,7 @@ import Link from "next/link";
 export const dynamic = "force-dynamic";
 
 export default async function CompanyOSPage() {
+  await requireAccess("/company-os");
   const [os, dash, orders, products, customers, finance] = await Promise.all([
     getCompanyOS(),
     getDashboard(),

@@ -1,3 +1,4 @@
+import { requireAccess } from "@/server/guard";
 import { getProduct } from "@/server/queries";
 import { notFound } from "next/navigation";
 import Link from "next/link";
@@ -9,6 +10,7 @@ import { ProductGallery } from "@/shared/ui/ProductThumb";
 export const dynamic = "force-dynamic";
 
 export default async function ProductPage({ params }: { params: Promise<{ id: string }> }) {
+  await requireAccess("/products");
   const { id } = await params;
   const data = await getProduct(Number(id));
   if (!data) notFound();
