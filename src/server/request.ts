@@ -1,8 +1,27 @@
 import { NextRequest, NextResponse } from "next/server";
 
+function configuredWriteOrigins(): Set<string> {
+  return new Set(
+    (process.env.ALLOWED_WRITE_ORIGINS ?? "")
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean)
+      .flatMap((value) => {
+        try {
+          return [new URL(value).origin];
+        } catch {
+          return [];
+        }
+      }),
+  );
+}
+
 /**
  * Reject cross-site writes. Requests without an Origin header are allowed for
  * non-browser clients such as health checks and server-to-server automation.
+ *
+ * ALLOWED_WRITE_ORIGINS is intentionally an exact, comma-separated allowlist
+ * for deployments whose reverse proxy cannot preserve the public host/proto.
  */
 export function rejectForeignWrite(req: NextRequest): NextResponse | null {
   const origin = req.headers.get("origin");
@@ -16,8 +35,9 @@ export function rejectForeignWrite(req: NextRequest): NextResponse | null {
     .trim();
 
   try {
+    const requestOrigin = new URL(origin).origin;
     const expectedOrigin = new URL(`${protocol}://${host}`).origin;
-    if (!host || !protocol || new URL(origin).origin !== expectedOrigin) {
+    if (!host || !protocol || (requestOrigin !== expectedOrigin && !configuredWriteOrigins().has(requestOrigin))) {
       return NextResponse.json({ error: "Недопустимый источник запроса" }, { status: 403 });
     }
   } catch {

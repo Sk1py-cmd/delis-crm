@@ -34,3 +34,27 @@ test("cross-origin writes and malformed proxy origins are rejected", () => {
 
   assert.equal(rejectForeignWrite(request({ host: "crm.example.uz" })), null);
 });
+
+test("an explicitly allowlisted public proxy origin can write without opening other origins", () => {
+  const previous = process.env.ALLOWED_WRITE_ORIGINS;
+  process.env.ALLOWED_WRITE_ORIGINS = "https://3000-preview.e2b.app, not-a-url";
+
+  try {
+    const allowed = rejectForeignWrite(request({
+      origin: "https://3000-preview.e2b.app",
+      host: "internal-preview:3000",
+      "x-forwarded-proto": "http",
+    }));
+    assert.equal(allowed, null);
+
+    const foreign = rejectForeignWrite(request({
+      origin: "https://attacker.example",
+      host: "internal-preview:3000",
+      "x-forwarded-proto": "http",
+    }));
+    assert.equal(foreign?.status, 403);
+  } finally {
+    if (previous === undefined) delete process.env.ALLOWED_WRITE_ORIGINS;
+    else process.env.ALLOWED_WRITE_ORIGINS = previous;
+  }
+});
