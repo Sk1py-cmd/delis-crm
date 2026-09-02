@@ -14,6 +14,8 @@ test("session and two-factor cookies use restrictive defaults", () => {
   try {
     assert.equal(sessionCookieOptions().sameSite, "lax");
     assert.equal(twoFactorCookieOptions(60).sameSite, "strict");
+    assert.equal(sessionCookieOptions().partitioned, false);
+    assert.equal(twoFactorCookieOptions(60).partitioned, false);
   } finally {
     restoreEnvironment("SESSION_COOKIE_SAME_SITE", previous);
   }
@@ -30,6 +32,8 @@ test("embedded cookie delivery needs an explicit opt-in and always uses Secure",
     assert.equal(twoFactor.sameSite, "none");
     assert.equal(session.secure, true);
     assert.equal(twoFactor.secure, true);
+    assert.equal(session.partitioned, true);
+    assert.equal(twoFactor.partitioned, true);
   } finally {
     restoreEnvironment("SESSION_COOKIE_SAME_SITE", previous);
   }

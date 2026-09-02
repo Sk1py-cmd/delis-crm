@@ -16,6 +16,9 @@ export function sessionCookieOptions(maxAge = SESSION_MAX_AGE_SECONDS) {
     secure: process.env.NODE_ENV === "production" || embedded,
     path: "/",
     sameSite: (embedded ? "none" : "lax") as "none" | "lax",
+    // Partitioned cookies remain available to this trusted embedded preview
+    // without granting its session to other top-level sites.
+    partitioned: embedded,
     maxAge,
   };
 }
@@ -27,6 +30,7 @@ export function twoFactorCookieOptions(maxAge: number) {
     secure: process.env.NODE_ENV === "production" || embedded,
     path: "/",
     sameSite: (embedded ? "none" : "strict") as "none" | "strict",
+    partitioned: embedded,
     maxAge,
   };
 }
